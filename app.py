@@ -15,6 +15,9 @@ import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 from difflib import SequenceMatcher
 
+# ---------------- Page Config (권장: 최상단) ----------------
+st.set_page_config(page_title="AI 스케치 퀴즈", page_icon="🎨", layout="wide")
+
 # ---------------- Gemini ----------------
 try:
     import google.generativeai as genai
@@ -65,6 +68,9 @@ def image_to_png_bytes(img: Image.Image) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+def blank_png_bytes(w: int = 640, h: int = 360, color=(255, 255, 255)) -> bytes:
+    return image_to_png_bytes(Image.new("RGB", (w, h), color))
+
 
 # ---------------- 카테고리 ----------------
 CATEGORIES = ["동물", "과일", "채소", "사물", "교통수단"]
@@ -108,6 +114,10 @@ def init_state():
     # AI 대기 & 자동제출용 최신 스냅샷
     ss.setdefault("ai_pending", False)
     ss.setdefault("last_canvas_png", None)
+
+    # 최종 결과 페이지용 히스토리
+    # [{round:int, word:str, guess:str, correct:bool, image:bytes}]
+    ss.setdefault("history", [])
 
 
 # ---------------- keyword.csv 로딩 ----------------
@@ -226,6 +236,7 @@ def start_game(keyword_bank: Dict[str, List[Dict[str, Any]]]):
         st.warning("해당 카테고리에서 제시어를 찾지 못했습니다. keyword.csv를 확인하세요.")
         return
 
+    ss["history"] = []  # 히스토리 초기화
     ss["targets_pool"] = pool
     ss["pool_index"] = 0
     ss["game_started"] = True
@@ -271,10 +282,11 @@ def end_game_if_needed():
     ss = st.session_state
     if ss["round"] >= ss["max_rounds"] and ss["submitted"]:
         ss["game_started"] = False
+        ss["page"] = "Results"  # ★ 결과 페이지로 이동
 
 
 def submit_answer_with_image(img_pil: Optional[Image.Image]):
-    """이미지를 받아 Gemini 호출 + 판정까지."""
+    """이미지를 받아 Gemini 호출 + 판정 + 히스토리 적재."""
     ss = st.session_state
     if ss["submitted"]:
         return
@@ -283,15 +295,47 @@ def submit_answer_with_image(img_pil: Optional[Image.Image]):
     guess = guess_from_image(img_pil, ss["category"]) if img_pil else "AI가 답을 찾지 못했습니다 😢"
     ss["last_guess"] = guess
 
-    if is_correct(guess, ss.get("target")):
+    correct = is_correct(guess, ss.get("target"))
+    if correct:
         ss["score"] += 1
+
+    # 제출 당시 이미지 스냅샷(없으면 빈 PNG)
+    if img_pil is not None:
+        img_bytes = image_to_png_bytes(img_pil)
+    else:
+        img_bytes = ss.get("last_canvas_png") or blank_png_bytes()
+
+    # 히스토리에 누적
+    ss["history"].append({
+        "round": ss["round"],
+        "word": (ss.get("target") or {}).get("word", ""),
+        "guess": guess,
+        "correct": correct,
+        "image": img_bytes,
+    })
 
 
 def pass_question():
     if not st.session_state.get("game_started"):
         return
     st.session_state["submitted"] = True
-    next_round()
+    # 라운드 한도 체크
+    if st.session_state["round"] >= st.session_state["max_rounds"]:
+        st.session_state["game_started"] = False
+        st.session_state["page"] = "Results"
+    else:
+        next_round()
+    st.rerun()
+
+
+# 공용 제출 트리거: 수동/자동 모두 이 경로로
+def trigger_submit():
+    ss = st.session_state
+    if ss.get("submitted") or ss.get("ai_pending"):
+        return
+    if ss.get("last_canvas_png") is None:
+        ss["last_canvas_png"] = blank_png_bytes()
+    ss["ai_pending"] = True
     st.rerun()
 
 
@@ -322,7 +366,7 @@ def refresh_label_from_inputs(idx: int):
 
 # ---------------- UI ----------------
 init_state()
-st.set_page_config(page_title="AI 스케치 퀴즈", page_icon="🎨", layout="wide")
+
 st.title("🎨 AI 스케치 퀴즈")
 
 # AI 상태 배너
@@ -341,6 +385,7 @@ if CSV_ERR:
 
 page = st.session_state.get("page", "Home")
 
+# ========================= HOME =========================
 if page == "Home":
     st.subheader("카테고리 선택")
     st.radio("카테고리", CATEGORIES, key="category", horizontal=True)
@@ -366,21 +411,33 @@ if page == "Home":
             refresh_label_from_inputs(i)
     st.button("+ 라벨 추가", on_click=add_label)
 
+# ========================= GAME =========================
 elif page == "Game":
 
-    # ===== 1) AI PENDING 핸들러: 최우선 처리 =====
+    # ---- (A) 0초 도달 시: UI 렌더 전에 서버가 먼저 자동 제출 트리거 ----
+    if (
+        st.session_state.get("game_started")
+        and st.session_state.get("round_end_time")
+        and datetime.utcnow() >= st.session_state["round_end_time"]
+        and not st.session_state.get("submitted")
+        and not st.session_state.get("ai_pending")
+    ):
+        trigger_submit()
+
+    # ---- (B) AI PENDING 핸들러: 최우선 처리 (버튼 제출/시간만료 모두 이 경로) ----
     if st.session_state.get("ai_pending") and not st.session_state.get("submitted"):
         with st.status("🤖 AI가 생각중입니다… 잠시만요.", state="running"):
             # 스냅샷에서 이미지 복원
-            img_bytes = st.session_state.get("last_canvas_png")
+            img_bytes = st.session_state.get("last_canvas_png") or blank_png_bytes()
             img_pil = None
-            if img_bytes:
-                try:
-                    img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-                except Exception:
-                    img_pil = None
+            try:
+                img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            except Exception:
+                img_pil = None
             submit_answer_with_image(img_pil)
+        # 제출 완료 → 같은 라운드에서 타이머가 다시 뜨지 않도록 시간 제거
         st.session_state["ai_pending"] = False
+        st.session_state["round_end_time"] = None
         st.rerun()
 
     # ------- 상태 행: 라운드 / 점수 / (오른쪽에 JS 타이머만) -------
@@ -405,16 +462,23 @@ elif page == "Game":
             </div>
             <script>
               const endTs = {int(end_dt.timestamp()*1000)};
-              function tick(){{
-                const now = Date.now();
-                let left = Math.max(0, Math.floor((endTs - now)/1000));
-                const el = document.getElementById('timer');
-                if(el) el.innerText = left;
+              const el = document.getElementById('timer');
+              let reloaded = false;
+              function reloadOnce(){{
+                if (reloaded) return;
+                reloaded = true;
+                clearInterval(tId);
+                setTimeout(() => window.location.reload(), 50);
               }}
-              tick();
+              function tick(){{
+                const left = Math.max(0, Math.floor((endTs - Date.now())/1000));
+                if (el) el.textContent = left;
+                if (left <= 0) reloadOnce();
+              }}
               const tId = setInterval(tick, 1000);
+              tick();
               const msLeft = Math.max(0, endTs - Date.now());
-              setTimeout(()=>{{ clearInterval(tId); window.location.reload(); }}, msLeft + 50);
+              setTimeout(reloadOnce, msLeft + 10);
             </script>
             """
             st.components.v1.html(timer_html, height=88)
@@ -423,7 +487,7 @@ elif page == "Game":
     if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']['word']} (그려보세요!)")
 
-        # 2) 캔버스 (라운드별 고유 키)
+        # 1) 캔버스 (라운드별 고유 키)
         canvas_res = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=6,
@@ -436,17 +500,18 @@ elif page == "Game":
             key=st.session_state["canvas_key"],
         )
         canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
-        # 스냅샷 저장(항상 최신 본)
+
+        # 항상 최신 스냅샷 유지 (선이 없어도 최소한 빈 PNG 보유)
         if canvas_img is not None:
             st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
+        elif st.session_state.get("last_canvas_png") is None:
+            st.session_state["last_canvas_png"] = blank_png_bytes()
 
-        # 3) 버튼들 (지우기 제거)
+        # 2) 버튼들
         cols = st.columns([1, 1, 1])
         with cols[0]:
             if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
-                # 이미 스냅샷 저장됨 → 대기 상태로 전환
-                st.session_state["ai_pending"] = True
-                st.rerun()
+                trigger_submit()
         with cols[1]:
             if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
                 pass_question()
@@ -454,22 +519,19 @@ elif page == "Game":
             if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
                 end_game_if_needed()
                 if not st.session_state["game_started"]:
-                    st.session_state["page"] = "Home"; st.rerun()
+                    # 결과 페이지 또는 홈으로 이동 로직은 end_game_if_needed가 결정
+                    st.rerun()
                 else:
                     next_round(); st.rerun()
 
-        # 4) 서버 권위 자동제출 트리거(스냅샷 저장 후 수행)
-        if (st.session_state.get("round_end_time")
-            and datetime.utcnow() >= st.session_state["round_end_time"]
-            and not st.session_state.get("submitted")
-            and not st.session_state.get("ai_pending")):
-            st.session_state["ai_pending"] = True
-            st.rerun()
-
-        # 5) 결과
+        # 3) 결과 (제출 후)
         if st.session_state["submitted"]:
             st.markdown("---")
             st.subheader("결과")
+            # 제출한 그림을 항상 보여줌 (제출 후에도 그림이 남아있도록 보장)
+            img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
+            st.image(img_preview, caption="제출한 그림", use_column_width=False, width=320)
+
             cols2 = st.columns(3)
             with cols2[0]:
                 st.caption("AI 추측")
@@ -486,15 +548,59 @@ elif page == "Game":
                 )
                 st.metric("판정", verdict)
 
-            # 게임 종료 처리
+            # 게임 종료 처리 안내
             if st.session_state["round"] >= st.session_state["max_rounds"]:
-                st.warning("게임이 종료되었습니다. 홈에서 새 게임을 시작하세요.")
-                if st.button("홈으로", use_container_width=True):
-                    st.session_state["game_started"] = False
-                    st.session_state["page"] = "Home"
-                    st.rerun()
+                st.warning("게임이 종료되었습니다. 결과 페이지로 이동해 전체 결과를 확인하세요.")
+                colr = st.columns(2)
+                with colr[0]:
+                    if st.button("결과 페이지로", type="primary", use_container_width=True):
+                        st.session_state["game_started"] = False
+                        st.session_state["page"] = "Results"
+                        st.rerun()
+                with colr[1]:
+                    if st.button("홈으로", use_container_width=True):
+                        st.session_state["game_started"] = False
+                        st.session_state["page"] = "Home"
+                        st.rerun()
     else:
         st.info("홈에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
+
+# ========================= RESULTS =========================
+elif page == "Results":
+    st.header("📊 최종 결과")
+    if not st.session_state.get("history"):
+        st.info("표시할 결과가 없습니다. 홈에서 새 게임을 시작해 보세요.")
+    else:
+        # 요약 통계
+        total = len(st.session_state["history"])
+        correct = sum(1 for h in st.session_state["history"] if h["correct"])
+        st.metric("총 점수", f"{correct}/{total}")
+
+        st.markdown("---")
+        # 라운드별 카드형 출력
+        for h in st.session_state["history"]:
+            with st.container(border=True):
+                cols = st.columns([2, 2, 3])
+                with cols[0]:
+                    st.image(h["image"], caption=f"Round {h['round']}", use_column_width=True)
+                with cols[1]:
+                    st.write(f"**정답 제시어:** {h['word']}")
+                    st.write(f"**AI 추측:** {h['guess']}")
+                with cols[2]:
+                    st.write("**판정:** " + ("✅ 성공" if h["correct"] else "❌ 실패"))
+
+        st.markdown("---")
+        c = st.columns(2)
+        with c[0]:
+            if st.button("다시 시작", type="primary", use_container_width=True):
+                st.session_state["page"] = "Home"
+                st.session_state["game_started"] = False
+                st.rerun()
+        with c[1]:
+            if st.button("홈으로", use_container_width=True):
+                st.session_state["page"] = "Home"
+                st.session_state["game_started"] = False
+                st.rerun()
 
 st.markdown("---")
 st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다. (정답 인정: 문자열 유사도 0.8 이상, aliases 지원)")
