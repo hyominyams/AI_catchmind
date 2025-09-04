@@ -4,7 +4,6 @@
 import os
 import io
 import csv
-import json
 import random
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Tuple
@@ -62,35 +61,13 @@ def normalize(s: Optional[str]) -> str:
 CATEGORIES = ["동물", "과일", "채소", "사물", "교통수단"]
 
 
-# ---------------- 동의어(정답 인정 범위) ----------------
-SYNONYMS: Dict[str, set] = {
-    "고양이": {"냥이", "야옹이", "캣"},
-    "강아지": {"개", "멍멍이", "도그"},
-    "자동차": {"차", "승용차", "카"},
-    "자전거": {"두바퀴", "바이크"},
-    "텔레비전": {"tv", "티비"},
-    "전화기": {"휴대폰", "핸드폰", "스마트폰", "폰"},
-    "축구공": {"축구 볼", "사커볼"},
-    "농구공": {"농구 볼", "바스켓볼"},
-    "야구공": {"야구 볼", "베이스볼"},
-}
-
-
-def canon_ko(w: str) -> str:
-    w = (w or "").strip().lower()
-    for canon, alts in SYNONYMS.items():
-        if w == canon or w in alts:
-            return canon
-    return w
-
-
 # ---------------- 프롬프트 (후보 단어 절대 제공 금지) ----------------
 PROMPT_GUESS_FREE = """
 [역할] 너는 초등학생의 스케치를 보고 정답을 추측하는 심판이다.
 [지시]
 - 카테고리: {category}
 - 이미지를 보고 한국어 단어 1개만 출력하라. (설명/문장/기호/영문 금지)
-- 거친 선·부정확한 비율 허용. 윤곽/상징 요소(바퀴, 날개 등) 중시.
+- 거친 선·부정확한 비율 허용. 윤곽/상징 요소(바퀴, 날개 등)를 중시.
 """
 
 
@@ -103,17 +80,18 @@ def init_state():
 
     ss.setdefault("game_started", False)
     ss.setdefault("score", 0)
-    ss.setdefault("round", 0)
+    ss.setdefault("round", 0)                   # 진행한 문제 수(제출/패스 포함)
 
-    ss.setdefault("targets_queue", [])  # keyword.csv에서 사전 생성된 제시어들
-    ss.setdefault("target", None)
+    ss.setdefault("targets_pool", [])           # CSV에서 섞어둔 전체 제시어 (여분 포함)
+    ss.setdefault("pool_index", 0)              # 다음에 쓸 인덱스
+    ss.setdefault("target", None)               # 현재 제시어
 
     ss.setdefault("submitted", False)
     ss.setdefault("last_guess", "")
     ss.setdefault("round_end_time", None)
     ss.setdefault("auto_submit_triggered", False)
 
-    ss.setdefault("ai_status", "unknown")   # ok | unavailable | error | unknown
+    ss.setdefault("ai_status", "unknown")       # ok | unavailable | error | unknown
     ss.setdefault("ai_error_msg", "")
 
     # 라벨링(선택): [{name: str, images: List[bytes]}]
@@ -132,15 +110,9 @@ def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[st
         with open(path, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader, None)
-            # 헤더 유무 관계없이 0=category, 1=keyword로 처리 시도
-            # 첫 줄이 헤더가 아닐 수도 있으므로, 재처리
-            if header and ("category" in header[0].lower() or "keyword" in header[1].lower()):
-                pass
-            else:
-                # 헤더가 없었다면 첫 줄도 포함해서 다시 처리
+            if not header or not (len(header) >= 2 and "category" in header[0].lower()):
                 f.seek(0)
                 reader = csv.reader(f)
-
             for row in reader:
                 if len(row) < 2:
                     continue
@@ -158,14 +130,14 @@ def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[st
         return {}, f"keyword.csv 로딩 오류: {e}"
 
 
-def pick_targets_from_csv(category: str, n: int, bank: Dict[str, List[str]]) -> List[str]:
-    """CSV 단어뱅크에서 카테고리별로 n개 랜덤 추출(중복 없이, 부족하면 중복 허용 보충)."""
-    candidates = bank.get(category, [])
-    if not candidates:
-        return []
-    if n <= len(candidates):
-        return random.sample(candidates, n)
-    return random.sample(candidates, len(candidates)) + random.choices(candidates, k=n - len(candidates))
+def build_targets_pool(category: str, bank: Dict[str, List[str]]) -> List[str]:
+    """
+    선택 카테고리의 모든 키워드를 섞어서 풀로 만듦(여분 포함).
+    패스가 있어도 충분히 다음 문제가 나오도록 전체를 준비한다.
+    """
+    candidates = (bank or {}).get(category, []).copy()
+    random.shuffle(candidates)
+    return candidates
 
 
 # ---------------- Gemini 호출 ----------------
@@ -213,17 +185,28 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
 # ---------------- 게임 플로우 ----------------
 def start_game(keyword_bank: Dict[str, List[str]]):
     ss = st.session_state
-    targets = pick_targets_from_csv(ss["category"], ss["max_rounds"], keyword_bank) or []
-    if len(targets) < ss["max_rounds"]:
-        st.warning("제시어를 충분히 생성하지 못했습니다. keyword.csv를 확인하세요.")
+    pool = build_targets_pool(ss["category"], keyword_bank)
+    if len(pool) == 0:
+        st.warning("해당 카테고리에서 제시어를 찾지 못했습니다. keyword.csv를 확인하세요.")
         return
 
-    ss["targets_queue"] = targets
+    ss["targets_pool"] = pool          # 여분 포함 전체
+    ss["pool_index"] = 0
     ss["game_started"] = True
     ss["score"] = 0
     ss["round"] = 0
     next_round()
     ss["page"] = "Game"
+    st.rerun()  # 즉시 전환
+
+
+def pick_next_target() -> Optional[str]:
+    ss = st.session_state
+    if ss["pool_index"] >= len(ss["targets_pool"]):
+        return None
+    t = ss["targets_pool"][ss["pool_index"]]
+    ss["pool_index"] += 1
+    return t
 
 
 def next_round():
@@ -233,11 +216,14 @@ def next_round():
     ss["last_guess"] = ""
     ss["auto_submit_triggered"] = False
 
-    idx = ss["round"] - 1
-    if 0 <= idx < len(ss.get("targets_queue", [])):
-        ss["target"] = ss["targets_queue"][idx]
-    else:
-        ss["target"] = None
+    ss["target"] = pick_next_target()
+
+    # 충분한 여분이 없을 수 있으나(극단적 패스 남발), 없으면 None
+    if ss["target"] is None:
+        st.warning("더 이상 출제할 제시어가 없습니다. Home으로 돌아가 새로 시작하세요.")
+        ss["game_started"] = False
+        ss["page"] = "Home"
+        return
 
     ss["round_end_time"] = datetime.utcnow() + timedelta(seconds=60)
 
@@ -255,8 +241,26 @@ def submit_answer(img_pil: Optional[Image.Image]):
     ss["submitted"] = True
     guess = guess_from_image(img_pil, ss["category"]) if img_pil else ""
     ss["last_guess"] = guess
-    if canon_ko(guess) == canon_ko(ss.get("target")):
+    if normalize(guess) == normalize(ss.get("target")):
         ss["score"] += 1
+
+
+def pass_question():
+    """
+    패스는 한 문제 소비로 간주(라운드 +1). 결과 화면 없이 곧바로 다음 문제로 이동.
+    """
+    if not st.session_state.get("game_started"):
+        return
+    # 라운드를 이미 시작한 상태이므로, 제출 처리만 '실패'로 간주하고 넘김
+    st.session_state["submitted"] = True
+    # 다음 문제로 즉시 전환
+    if st.session_state["round"] >= st.session_state["max_rounds"]:
+        # 이미 목표 수만큼 진행했으면 종료
+        st.session_state["game_started"] = False
+        st.session_state["page"] = "Home"
+    else:
+        next_round()
+    st.rerun()
 
 
 # ---------------- 라벨링(선택) ----------------
@@ -312,7 +316,6 @@ page = st.session_state.get("page", "Home")
 if page == "Home":
     st.subheader("카테고리 선택")
     st.radio("카테고리", CATEGORIES, key="category", horizontal=True)
-
     st.number_input("문제 수", min_value=1, max_value=20, step=1, key="max_rounds")
     st.button("게임 시작", type="primary", on_click=start_game, args=(KEYWORD_BANK,))
 
@@ -321,7 +324,6 @@ if page == "Home":
     # 라벨링(선택) — 하단
     st.subheader("라벨링(선택) · 정확도 보조자료")
     st.caption("필수 아님: 라벨과 참조 이미지를 추가하면 판정 시 참고합니다.")
-
     for i, item in enumerate(st.session_state["label_sets"]):
         with st.container(border=True):
             cols = st.columns([6, 1])
@@ -337,20 +339,25 @@ if page == "Home":
                 accept_multiple_files=True,
             )
             refresh_label_from_inputs(i)
-
     st.button("+ 라벨 추가", on_click=add_label)
 
 elif page == "Game":
-    # 1초 갱신
+    # 1초 타이머: 우선 내장/외부 모두 시도 (외부 패키지 없어도 동작하도록 JS 폴백)
     if st.session_state.get("game_started") and not st.session_state.get("submitted"):
         try:
-            st.autorefresh(interval=1000, key="__tick__")
+            # streamlit-autorefresh 패키지가 있으면 사용
+            from streamlit_autorefresh import st_autorefresh  # type: ignore
+            st_autorefresh(interval=1000, key="__tick__")
         except Exception:
-            pass
+            # JS 폴백: 1초마다 새로고침
+            st.markdown(
+                "<script>setTimeout(function(){window.location.reload();}, 1000);</script>",
+                unsafe_allow_html=True,
+            )
 
     status_cols = st.columns([1, 1, 2])
     with status_cols[0]:
-        st.metric("라운드", f"{st.session_state['round']}")
+        st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
     with status_cols[1]:
         st.metric("점수", f"{st.session_state['score']}")
     with status_cols[2]:
@@ -380,17 +387,27 @@ elif page == "Game":
         )
         canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
 
-        cols = st.columns([1, 1, 1])
+        cols = st.columns([1, 1, 1, 1])
         with cols[0]:
             if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
-                submit_answer(canvas_img)
+                submit_answer(canvas_img); st.rerun()
         with cols[1]:
             if st.button("지우기", use_container_width=True):
                 st.session_state.pop("canvas", None)
-                st.experimental_rerun()
+                st.rerun()
+        with cols[2]:
+            if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
+                pass_question()
+        with cols[3]:
+            if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
+                end_game_if_needed()
+                if not st.session_state["game_started"]:
+                    st.session_state["page"] = "Home"; st.rerun()
+                else:
+                    next_round(); st.rerun()
 
         if st.session_state.get("auto_submit_triggered") and not st.session_state["submitted"]:
-            submit_answer(canvas_img)
+            submit_answer(canvas_img); st.rerun()
 
         if st.session_state["submitted"]:
             st.markdown("---")
@@ -408,21 +425,18 @@ elif page == "Game":
             with cols2[2]:
                 verdict = (
                     "✅ 성공"
-                    if canon_ko(st.session_state["last_guess"]) == canon_ko(st.session_state.get("target"))
+                    if normalize(st.session_state["last_guess"]) == normalize(st.session_state.get("target"))
                     else "❌ 실패"
                 )
                 st.metric("판정", verdict)
 
-            nxt = st.button("다음 문제로", use_container_width=True)
-            if nxt:
-                end_game_if_needed()
-                if not st.session_state["game_started"]:
-                    st.warning("게임이 종료되었습니다. 홈에서 새 게임을 시작하세요.")
+            # 끝났으면 알림 + 홈 이동 버튼
+            if st.session_state["round"] >= st.session_state["max_rounds"]:
+                st.warning("게임이 종료되었습니다. 홈에서 새 게임을 시작하세요.")
+                if st.button("홈으로", use_container_width=True):
+                    st.session_state["game_started"] = False
                     st.session_state["page"] = "Home"
-                else:
-                    next_round()
-
-            end_game_if_needed()
+                    st.rerun()
     else:
         st.info("홈에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
 
