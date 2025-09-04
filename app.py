@@ -89,7 +89,8 @@ def init_state():
 
     ss.setdefault("game_started", False)
     ss.setdefault("score", 0)
-    ss.setdefault("round", 0)
+    ss.setdefault("round", 0)                   # 진행한 문제 수(1부터 시작)
+    ss.setdefault("canvas_key", "canvas_0")     # 라운드별 캔버스 키
 
     ss.setdefault("targets_pool", [])
     ss.setdefault("pool_index", 0)
@@ -191,9 +192,7 @@ def start_game(keyword_bank: Dict[str, List[str]]):
     ss["game_started"] = True
     ss["score"] = 0
     ss["round"] = 0
-    # 캔버스 초기화
-    st.session_state.pop("canvas", None)
-    next_round()
+    next_round()  # round=1부터 시작됨
     ss["page"] = "Game"
     st.rerun()
 
@@ -212,8 +211,6 @@ def next_round():
     ss["round"] += 1
     ss["submitted"] = False
     ss["last_guess"] = ""
-    # 다음 문제로 넘어갈 때 캔버스 자동 초기화
-    st.session_state.pop("canvas", None)
 
     ss["target"] = pick_next_target()
     if ss["target"] is None:
@@ -222,6 +219,8 @@ def next_round():
         ss["page"] = "Home"
         return
 
+    # 라운드별 캔버스 키 → 새 캔버스로 렌더
+    ss["canvas_key"] = f"canvas_{ss['round']}"
     ss["round_end_time"] = datetime.utcnow() + timedelta(seconds=60)
 
 
@@ -245,6 +244,7 @@ def submit_answer(img_pil: Optional[Image.Image]):
 def pass_question():
     if not st.session_state.get("game_started"):
         return
+    # 패스는 곧바로 다음 라운드
     st.session_state["submitted"] = True
     next_round()
     st.rerun()
@@ -329,41 +329,42 @@ elif page == "Game":
     with status_cols[1]:
         st.metric("점수", f"{st.session_state['score']}")
     with status_cols[2]:
-        # 제출되지 않았을 때만 타이머 표시 (무한 새고침 방지)
         if st.session_state.get("game_started") and st.session_state.get("round_end_time") and not st.session_state.get("submitted"):
             end_dt = st.session_state["round_end_time"]
             remain = int((end_dt - datetime.utcnow()).total_seconds())
             remain = max(0, remain)
             timer_html = f"""
             <div style="display:flex;justify-content:flex-end;align-items:center;">
-              <div id="timer" style="font-size:48px;font-weight:700;margin-top:6px;">{remain}</div>
+              <div id="timer" style="font-size:48px;font-weight:700;line-height:64px;padding-bottom:8px;">{remain}</div>
             </div>
             <script>
               const endTs = {int(end_dt.timestamp()*1000)};
+              // 남은 시간 표시
               function tick(){{
                 const now = Date.now();
                 let left = Math.max(0, Math.floor((endTs - now)/1000));
                 const el = document.getElementById('timer');
                 if(el) el.innerText = left;
-                if(left<=0) setTimeout(()=>window.location.reload(), 200);
               }}
               tick();
-              setInterval(tick, 1000);
+              const tId = setInterval(tick, 1000);
+              // 정확히 종료 시각에 한 번만 리로드 → 서버가 자동제출 처리
+              const msLeft = Math.max(0, endTs - Date.now());
+              setTimeout(()=>{{ clearInterval(tId); window.location.reload(); }}, msLeft + 50);
             </script>
             """
-            st.components.v1.html(timer_html, height=60)
+            st.components.v1.html(timer_html, height=88)
 
     # ---- 서버 권위: 0초 도달 즉시 자동제출(한 번만) ----
     if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
         if datetime.utcnow() >= st.session_state["round_end_time"] and not st.session_state.get("submitted"):
-            # 시간 초과 → 이미지 없이 자동 제출
-            submit_answer(None)
+            submit_answer(None)   # 이미지 없이 자동 제출
             st.rerun()
 
     if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']} (그려보세요!)")
 
-        # 캔버스
+        # 캔버스 (라운드별 고유 키)
         canvas_res = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=6,
@@ -373,22 +374,19 @@ elif page == "Game":
             height=360,
             width=640,
             drawing_mode="freedraw",
-            key="canvas",
+            key=st.session_state["canvas_key"],
         )
         canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
 
-        cols = st.columns([1, 1, 1, 1])
+        cols = st.columns([1, 1, 1])
         with cols[0]:
             if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
                 submit_answer(canvas_img); st.rerun()
+        # with cols[1]:  # 지우기 버튼 제거 (캔버스 휴지통 사용)
         with cols[1]:
-            if st.button("지우기", use_container_width=True):
-                st.session_state.pop("canvas", None)
-                st.rerun()
-        with cols[2]:
             if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
                 pass_question()
-        with cols[3]:
+        with cols[2]:
             if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
                 end_game_if_needed()
                 if not st.session_state["game_started"]:
