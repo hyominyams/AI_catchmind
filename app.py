@@ -89,12 +89,12 @@ def init_state():
 
     ss.setdefault("game_started", False)
     ss.setdefault("score", 0)
-    ss.setdefault("round", 0)                   # 진행한 문제 수(1부터 시작)
+    ss.setdefault("round", 0)                   # 1부터 진행
     ss.setdefault("canvas_key", "canvas_0")     # 라운드별 캔버스 키
 
-    ss.setdefault("targets_pool", [])
+    ss.setdefault("targets_pool", [])           # [{word:str, aliases:[...]}]
     ss.setdefault("pool_index", 0)
-    ss.setdefault("target", None)
+    ss.setdefault("target", None)               # {"word": ..., "aliases":[...]}
 
     ss.setdefault("submitted", False)
     ss.setdefault("last_guess", "")
@@ -105,36 +105,63 @@ def init_state():
 
     ss.setdefault("label_sets", [])
 
+    # AI 대기 & 자동제출용 최신 스냅샷
+    ss.setdefault("ai_pending", False)
+    ss.setdefault("last_canvas_png", None)
 
-# ---------------- keyword.csv ----------------
+
+# ---------------- keyword.csv 로딩 ----------------
 @st.cache_data(show_spinner=False)
-def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[str]], Optional[str]]:
-    data: Dict[str, List[str]] = {}
+def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[Dict[str, Any]]], Optional[str]]:
+    """
+    CSV 형식(권장): category,keyword,aliases
+    - aliases는 '|' 로 구분 (없어도 됨)
+    반환: {카테고리: [ {"word": str, "aliases": [str,...]} , ... ]}
+    """
+    bank: Dict[str, List[Dict[str, Any]]] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader, None)
-            if not header or not (len(header) >= 2 and "category" in header[0].lower()):
+            # 헤더 판단
+            has_header = False
+            idx_cat, idx_kw, idx_alias = 0, 1, None
+            if header:
+                h = [c.strip().lower() for c in header]
+                if "category" in h and "keyword" in h:
+                    has_header = True
+                    idx_cat = h.index("category")
+                    idx_kw = h.index("keyword")
+                    idx_alias = h.index("aliases") if "aliases" in h else None
+            if not has_header:
                 f.seek(0)
                 reader = csv.reader(f)
+                idx_cat, idx_kw, idx_alias = 0, 1, None
+
             for row in reader:
-                if len(row) < 2:
+                if len(row) <= idx_kw:
                     continue
-                cat = row[0].strip()
-                word = row[1].strip()
+                cat = (row[idx_cat] if idx_cat is not None else "").strip()
+                word = (row[idx_kw] if idx_kw is not None else "").strip()
                 if not cat or not word:
                     continue
-                data.setdefault(cat, [])
-                if word not in data[cat]:
-                    data[cat].append(word)
-        return data, None
+                aliases: List[str] = []
+                if idx_alias is not None and len(row) > idx_alias and row[idx_alias]:
+                    aliases = [a.strip() for a in row[idx_alias].split("|") if a.strip()]
+                bank.setdefault(cat, [])
+                entry = {"word": word, "aliases": aliases}
+                # 중복 방지
+                if all(e["word"] != word for e in bank[cat]):
+                    bank[cat].append(entry)
+
+        return bank, None
     except FileNotFoundError:
         return {}, "keyword.csv 파일이 없습니다. 프로젝트 루트에 배치해 주세요."
     except Exception as e:
         return {}, f"keyword.csv 로딩 오류: {e}"
 
 
-def build_targets_pool(category: str, bank: Dict[str, List[str]]) -> List[str]:
+def build_targets_pool(category: str, bank: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     candidates = (bank or {}).get(category, []).copy()
     random.shuffle(candidates)
     return candidates
@@ -179,8 +206,20 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         return "AI가 답을 찾지 못했습니다 😢"
 
 
+# ---------------- 정답 판정 ----------------
+def is_correct(guess: str, target: Dict[str, Any], threshold: float = 0.8) -> bool:
+    if not target:
+        return False
+    candidates = [target.get("word", "")]
+    candidates += target.get("aliases", []) or []
+    for c in candidates:
+        if sim(guess, c) >= threshold:
+            return True
+    return False
+
+
 # ---------------- 게임 플로우 ----------------
-def start_game(keyword_bank: Dict[str, List[str]]):
+def start_game(keyword_bank: Dict[str, List[Dict[str, Any]]]):
     ss = st.session_state
     pool = build_targets_pool(ss["category"], keyword_bank)
     if len(pool) == 0:
@@ -192,12 +231,14 @@ def start_game(keyword_bank: Dict[str, List[str]]):
     ss["game_started"] = True
     ss["score"] = 0
     ss["round"] = 0
-    next_round()  # round=1부터 시작됨
+    ss["last_canvas_png"] = None
+    ss["ai_pending"] = False
+    next_round()  # round=1부터 시작
     ss["page"] = "Game"
     st.rerun()
 
 
-def pick_next_target() -> Optional[str]:
+def pick_next_target() -> Optional[Dict[str, Any]]:
     ss = st.session_state
     if ss["pool_index"] >= len(ss["targets_pool"]):
         return None
@@ -211,6 +252,8 @@ def next_round():
     ss["round"] += 1
     ss["submitted"] = False
     ss["last_guess"] = ""
+    ss["ai_pending"] = False
+    ss["last_canvas_png"] = None
 
     ss["target"] = pick_next_target()
     if ss["target"] is None:
@@ -230,21 +273,23 @@ def end_game_if_needed():
         ss["game_started"] = False
 
 
-def submit_answer(img_pil: Optional[Image.Image]):
+def submit_answer_with_image(img_pil: Optional[Image.Image]):
+    """이미지를 받아 Gemini 호출 + 판정까지."""
     ss = st.session_state
     if ss["submitted"]:
         return
     ss["submitted"] = True
+
     guess = guess_from_image(img_pil, ss["category"]) if img_pil else "AI가 답을 찾지 못했습니다 😢"
     ss["last_guess"] = guess
-    if sim(guess, ss.get("target", "")) >= 0.8:
+
+    if is_correct(guess, ss.get("target")):
         ss["score"] += 1
 
 
 def pass_question():
     if not st.session_state.get("game_started"):
         return
-    # 패스는 곧바로 다음 라운드
     st.session_state["submitted"] = True
     next_round()
     st.rerun()
@@ -322,6 +367,22 @@ if page == "Home":
     st.button("+ 라벨 추가", on_click=add_label)
 
 elif page == "Game":
+
+    # ===== 1) AI PENDING 핸들러: 최우선 처리 =====
+    if st.session_state.get("ai_pending") and not st.session_state.get("submitted"):
+        with st.status("🤖 AI가 생각중입니다… 잠시만요.", state="running"):
+            # 스냅샷에서 이미지 복원
+            img_bytes = st.session_state.get("last_canvas_png")
+            img_pil = None
+            if img_bytes:
+                try:
+                    img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                except Exception:
+                    img_pil = None
+            submit_answer_with_image(img_pil)
+        st.session_state["ai_pending"] = False
+        st.rerun()
+
     # ------- 상태 행: 라운드 / 점수 / (오른쪽에 JS 타이머만) -------
     status_cols = st.columns([1, 1, 2])
     with status_cols[0]:
@@ -329,17 +390,21 @@ elif page == "Game":
     with status_cols[1]:
         st.metric("점수", f"{st.session_state['score']}")
     with status_cols[2]:
-        if st.session_state.get("game_started") and st.session_state.get("round_end_time") and not st.session_state.get("submitted"):
+        if (st.session_state.get("game_started")
+            and st.session_state.get("round_end_time")
+            and not st.session_state.get("submitted")
+            and not st.session_state.get("ai_pending")):
             end_dt = st.session_state["round_end_time"]
             remain = int((end_dt - datetime.utcnow()).total_seconds())
             remain = max(0, remain)
             timer_html = f"""
             <div style="display:flex;justify-content:flex-end;align-items:center;">
-              <div id="timer" style="font-size:48px;font-weight:700;line-height:64px;padding-bottom:8px;">{remain}</div>
+              <div id="timer" style="font-size:48px;font-weight:700;line-height:64px;margin-top:-4px;padding-bottom:6px;">
+                {remain}
+              </div>
             </div>
             <script>
               const endTs = {int(end_dt.timestamp()*1000)};
-              // 남은 시간 표시
               function tick(){{
                 const now = Date.now();
                 let left = Math.max(0, Math.floor((endTs - now)/1000));
@@ -348,23 +413,17 @@ elif page == "Game":
               }}
               tick();
               const tId = setInterval(tick, 1000);
-              // 정확히 종료 시각에 한 번만 리로드 → 서버가 자동제출 처리
               const msLeft = Math.max(0, endTs - Date.now());
               setTimeout(()=>{{ clearInterval(tId); window.location.reload(); }}, msLeft + 50);
             </script>
             """
             st.components.v1.html(timer_html, height=88)
 
-    # ---- 서버 권위: 0초 도달 즉시 자동제출(한 번만) ----
-    if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
-        if datetime.utcnow() >= st.session_state["round_end_time"] and not st.session_state.get("submitted"):
-            submit_answer(None)   # 이미지 없이 자동 제출
-            st.rerun()
-
+    # 진행 중이면 메인 UI
     if st.session_state.get("game_started"):
-        st.subheader(f"제시어: {st.session_state['target']} (그려보세요!)")
+        st.subheader(f"제시어: {st.session_state['target']['word']} (그려보세요!)")
 
-        # 캔버스 (라운드별 고유 키)
+        # 2) 캔버스 (라운드별 고유 키)
         canvas_res = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=6,
@@ -377,12 +436,17 @@ elif page == "Game":
             key=st.session_state["canvas_key"],
         )
         canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
+        # 스냅샷 저장(항상 최신 본)
+        if canvas_img is not None:
+            st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
 
+        # 3) 버튼들 (지우기 제거)
         cols = st.columns([1, 1, 1])
         with cols[0]:
             if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
-                submit_answer(canvas_img); st.rerun()
-        # with cols[1]:  # 지우기 버튼 제거 (캔버스 휴지통 사용)
+                # 이미 스냅샷 저장됨 → 대기 상태로 전환
+                st.session_state["ai_pending"] = True
+                st.rerun()
         with cols[1]:
             if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
                 pass_question()
@@ -394,6 +458,15 @@ elif page == "Game":
                 else:
                     next_round(); st.rerun()
 
+        # 4) 서버 권위 자동제출 트리거(스냅샷 저장 후 수행)
+        if (st.session_state.get("round_end_time")
+            and datetime.utcnow() >= st.session_state["round_end_time"]
+            and not st.session_state.get("submitted")
+            and not st.session_state.get("ai_pending")):
+            st.session_state["ai_pending"] = True
+            st.rerun()
+
+        # 5) 결과
         if st.session_state["submitted"]:
             st.markdown("---")
             st.subheader("결과")
@@ -404,15 +477,16 @@ elif page == "Game":
                 st.success(guess_text)
             with cols2[1]:
                 st.caption("정답 제시어")
-                st.info(st.session_state["target"] or "(없음)")
+                st.info(st.session_state["target"]["word"] if st.session_state["target"] else "(없음)")
             with cols2[2]:
                 verdict = (
                     "✅ 성공"
-                    if sim(st.session_state["last_guess"], st.session_state.get("target", "")) >= 0.8
+                    if is_correct(st.session_state["last_guess"], st.session_state.get("target"))
                     else "❌ 실패"
                 )
                 st.metric("판정", verdict)
 
+            # 게임 종료 처리
             if st.session_state["round"] >= st.session_state["max_rounds"]:
                 st.warning("게임이 종료되었습니다. 홈에서 새 게임을 시작하세요.")
                 if st.button("홈으로", use_container_width=True):
@@ -423,4 +497,4 @@ elif page == "Game":
         st.info("홈에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
 
 st.markdown("---")
-st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다. (정답 인정: 문자열 유사도 0.8 이상)")
+st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다. (정답 인정: 문자열 유사도 0.8 이상, aliases 지원)")
