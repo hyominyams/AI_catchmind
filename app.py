@@ -381,17 +381,37 @@ elif page == "Game":
             """
             st.components.v1.html(timer_html, height=70)
 
-    status_cols = st.columns([1, 1, 2])
-    with status_cols[0]:
-        st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
-    with status_cols[1]:
-        st.metric("점수", f"{st.session_state['score']}")
-    with status_cols[2]:
-        # 서버에서도 동일 계산(권위적 상태)
-        if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
-            remaining = int((st.session_state["round_end_time"] - datetime.utcnow()).total_seconds())
-            remaining = max(0, remaining)
-            st.metric("남은 시간 (초)", f"{remaining}")
+status_cols = st.columns([1, 1, 2])
+with status_cols[0]:
+    st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
+with status_cols[1]:
+    st.metric("점수", f"{st.session_state['score']}")
+with status_cols[2]:
+    # JS 타이머
+    if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
+        end_dt = st.session_state["round_end_time"]
+        remain = int((end_dt - datetime.utcnow()).total_seconds())
+        remain = max(0, remain)
+        timer_html = f"""
+        <div style="display:flex;justify-content:flex-end;align-items:center;">
+          <div id="timer" style="font-size:48px;font-weight:700;margin-top:6px;">{remain}</div>
+        </div>
+        <script>
+          const endTs = {int(end_dt.timestamp()*1000)};
+          function tick(){{
+            const now = Date.now();
+            let left = Math.max(0, Math.floor((endTs - now)/1000));
+            const el = document.getElementById('timer');
+            if(el) el.innerText = left;
+            if(left<=0) setTimeout(()=>window.location.reload(), 200);
+          }}
+          tick();
+          setInterval(tick, 1000);
+        </script>
+        """
+        st.components.v1.html(timer_html, height=60)
+
+
 
     if st.session_state.get("game_started"):
         # 시간 만료 자동 제출(서버 권위)
