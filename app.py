@@ -78,11 +78,12 @@ CATEGORIES = ["동물", "과일", "채소", "사물", "교통수단"]
 
 # ---------------- 프롬프트 ----------------
 PROMPT_GUESS_FREE = """
-[역할] 너는 초등학생의 스케치를 보고 정답을 추측하는 심판이다.
+[역할] 당신은 지금부터 학생들의 스케치를 보고 "단어"를 맞추는 탐정입니다. 주어진 스케치와 카테고리 정보를 결합하여 한국어 단어를 출력하세요. 
 [지시]
 - 카테고리: {category}
-- 이미지를 보고 한국어 단어 1개만 출력하라. (설명/문장/기호/영문 금지)
-- 거친 선·부정확한 비율 허용. 윤곽/상징 요소(바퀴, 날개 등)를 중시.
+- 이미지를 보고 한국어 단어 1개만 출력하세요. (설명/문장/기호/영문 금지)
+- 거친 선·부정확한 비율 허용. 윤곽/상징 요소(바퀴, 날개 등)를 중시하여 판단하세요.
+- **주어진 카테고리 정보에 기반해서 단어를 출력하세요. 카테고리를 벗어나는 단어를 출력하지 않습니다.**
 """
 
 
@@ -469,64 +470,58 @@ elif page == "Game":
     if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']['word']} (그려보세요!)")
 
-        if not expired and not st.session_state.get("submitted"):
-            # ---- 캔버스 사용 가능 상태 ----
-            canvas_res = st_canvas(
-                fill_color="rgba(0, 0, 0, 0)",
-                stroke_width=6,
-                stroke_color="#000000",
-                background_color="#FFFFFF",
-                update_streamlit=True,
-                height=360,
-                width=640,
-                drawing_mode="freedraw",
-                key=st.session_state["canvas_key"],
-            )
-            canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
-            # 최신 스냅샷 유지
-            if canvas_img is not None:
-                st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
-            elif st.session_state.get("last_canvas_png") is None:
-                st.session_state["last_canvas_png"] = blank_png_bytes()
+        # 1) 아직 제출 전: 시간 상태에 따라 캔버스/잠금 분기
+        if not st.session_state.get("submitted"):
+            if not expired:
+                # ---- 캔버스 사용 가능 상태 ----
+                canvas_res = st_canvas(
+                    fill_color="rgba(0, 0, 0, 0)",
+                    stroke_width=6,
+                    stroke_color="#000000",
+                    background_color="#FFFFFF",
+                    update_streamlit=True,
+                    height=360,
+                    width=640,
+                    drawing_mode="freedraw",
+                    key=st.session_state["canvas_key"],
+                )
+                canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
+                # 최신 스냅샷 유지
+                if canvas_img is not None:
+                    st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
+                elif st.session_state.get("last_canvas_png") is None:
+                    st.session_state["last_canvas_png"] = blank_png_bytes()
 
-            cols = st.columns([1, 1, 1])
-            with cols[0]:
-                if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
-                    trigger_submit()
-            with cols[1]:
-                if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
-                    pass_question()
-            with cols[2]:
-                if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
-                    end_game_if_needed()
-                    if not st.session_state["game_started"]:
-                        st.rerun()
-                    else:
-                        next_round(); st.rerun()
+                cols = st.columns([1, 1, 1])
+                with cols[0]:
+                    if st.button("제출", type="primary", use_container_width=True):
+                        trigger_submit()
+                with cols[1]:
+                    if st.button("패스", use_container_width=True):
+                        pass_question()
+                with cols[2]:
+                    # 제출 전에는 다음 문제 버튼 비활성화
+                    st.button("다음 문제", use_container_width=True, disabled=True)
 
+            else:
+                # ---- ⏰ 만료: 캔버스 잠금 + 제출 유도 메시지 ----
+                img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
+                st.image(img_preview, caption="⏰ 시간이 끝났습니다. 그림은 잠겼어요.", width=640)
+                st.warning("시간이 종료되었습니다. **제출하세요** 버튼을 눌러 결과를 확인해주세요.")
+
+                cols = st.columns([1, 1, 1])
+                with cols[0]:
+                    if st.button("제출", type="primary", use_container_width=True):
+                        trigger_submit()
+                with cols[1]:
+                    if st.button("패스", use_container_width=True):
+                        pass_question()
+                with cols[2]:
+                    # 제출 전에는 다음 문제 버튼 비활성화
+                    st.button("다음 문제", use_container_width=True, disabled=True)
+
+        # 2) 이미 제출됨: 잠금/경고는 숨기고 결과만 노출
         else:
-            # ---- ⏰ 만료: 캔버스 잠금 + 제출 유도 메시지 ----
-            img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
-            st.image(img_preview, caption="⏰ 시간이 끝났습니다. 그림은 잠겼어요.", width=640)
-            st.warning("시간이 종료되었습니다. **제출하세요** 버튼을 눌러 결과를 확인해주세요.")
-
-            cols = st.columns([1, 1, 1])
-            with cols[0]:
-                if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
-                    trigger_submit()
-            with cols[1]:
-                if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
-                    pass_question()
-            with cols[2]:
-                if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
-                    end_game_if_needed()
-                    if not st.session_state["game_started"]:
-                        st.rerun()
-                    else:
-                        next_round(); st.rerun()
-
-        # ---- 제출 후 결과 패널 ----
-        if st.session_state["submitted"]:
             st.markdown("---")
             st.subheader("결과")
             img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
@@ -548,6 +543,7 @@ elif page == "Game":
                 )
                 st.metric("판정", verdict)
 
+            # 라운드 종료 시 이동 버튼
             if st.session_state["round"] >= st.session_state["max_rounds"]:
                 st.warning("게임이 종료되었습니다. 결과 페이지로 이동해 전체 결과를 확인하세요.")
                 colr = st.columns(2)
