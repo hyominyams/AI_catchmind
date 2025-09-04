@@ -98,7 +98,6 @@ def init_state():
     ss.setdefault("submitted", False)
     ss.setdefault("last_guess", "")
     ss.setdefault("round_end_time", None)
-    ss.setdefault("auto_submit_triggered", False)
 
     ss.setdefault("ai_status", "unknown")
     ss.setdefault("ai_error_msg", "")
@@ -159,16 +158,12 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         return ""
     model = get_gemini_model()
     if model is None:
-        return ""
+        return ""  # 상태 배너로 안내
 
     prompt = PROMPT_GUESS_FREE.format(category=category)
     try:
-        parts = [
-            prompt,
-            {"mime_type": "image/png", "data": image_to_png_bytes(img)},
-        ]
+        parts = [prompt, {"mime_type": "image/png", "data": image_to_png_bytes(img)}]
         parts.extend(build_reference_parts(st.session_state.get("label_sets", [])))
-
         resp = model.generate_content(parts)
         text = (getattr(resp, "text", "") or "").strip()
         text = text.replace("\n", " ").replace("\r", " ").strip().strip('"\'')
@@ -196,6 +191,8 @@ def start_game(keyword_bank: Dict[str, List[str]]):
     ss["game_started"] = True
     ss["score"] = 0
     ss["round"] = 0
+    # 캔버스 초기화
+    st.session_state.pop("canvas", None)
     next_round()
     ss["page"] = "Game"
     st.rerun()
@@ -215,7 +212,8 @@ def next_round():
     ss["round"] += 1
     ss["submitted"] = False
     ss["last_guess"] = ""
-    ss["auto_submit_triggered"] = False
+    # 다음 문제로 넘어갈 때 캔버스 자동 초기화
+    st.session_state.pop("canvas", None)
 
     ss["target"] = pick_next_target()
     if ss["target"] is None:
@@ -248,11 +246,7 @@ def pass_question():
     if not st.session_state.get("game_started"):
         return
     st.session_state["submitted"] = True
-    if st.session_state["round"] >= st.session_state["max_rounds"]:
-        st.session_state["game_started"] = False
-        st.session_state["page"] = "Home"
-    else:
-        next_round()
+    next_round()
     st.rerun()
 
 
@@ -260,12 +254,10 @@ def pass_question():
 def add_label():
     st.session_state["label_sets"].append({"name": "", "images": []})
 
-
 def remove_label(idx: int):
     labels = st.session_state.get("label_sets", [])
     if 0 <= idx < len(labels):
         labels.pop(idx)
-
 
 def refresh_label_from_inputs(idx: int):
     key_name = f"label_name_{idx}"
@@ -273,7 +265,6 @@ def refresh_label_from_inputs(idx: int):
     name_val = st.session_state.get(key_name, "").strip()
     files_val = st.session_state.get(key_files) or []
     st.session_state["label_sets"][idx]["name"] = name_val
-
     imgs: List[bytes] = []
     for f in files_val[:10]:
         try:
@@ -287,7 +278,6 @@ def refresh_label_from_inputs(idx: int):
 # ---------------- UI ----------------
 init_state()
 st.set_page_config(page_title="AI 스케치 퀴즈", page_icon="🎨", layout="wide")
-
 st.title("🎨 AI 스케치 퀴즈")
 
 # AI 상태 배너
@@ -322,7 +312,6 @@ if page == "Home":
                 st.text_input("라벨 이름", value=item.get("name", ""), key=f"label_name_{i}", placeholder="예: 사과")
             with cols[1]:
                 st.button("🗑️ 삭제", key=f"delete_label_{i}", on_click=remove_label, args=(i,), use_container_width=True)
-
             st.file_uploader(
                 "참조 이미지(최대 10장)",
                 key=f"label_files_{i}",
@@ -340,7 +329,8 @@ elif page == "Game":
     with status_cols[1]:
         st.metric("점수", f"{st.session_state['score']}")
     with status_cols[2]:
-        if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
+        # 제출되지 않았을 때만 타이머 표시 (무한 새고침 방지)
+        if st.session_state.get("game_started") and st.session_state.get("round_end_time") and not st.session_state.get("submitted"):
             end_dt = st.session_state["round_end_time"]
             remain = int((end_dt - datetime.utcnow()).total_seconds())
             remain = max(0, remain)
@@ -363,15 +353,17 @@ elif page == "Game":
             """
             st.components.v1.html(timer_html, height=60)
 
-    if st.session_state.get("game_started"):
-        # 서버 권위: 시간 만료 시 자동 제출 플래그
-        if st.session_state.get("round_end_time") and datetime.utcnow() >= st.session_state["round_end_time"]:
-            if not st.session_state["submitted"]:
-                st.session_state["auto_submit_triggered"] = True
+    # ---- 서버 권위: 0초 도달 즉시 자동제출(한 번만) ----
+    if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
+        if datetime.utcnow() >= st.session_state["round_end_time"] and not st.session_state.get("submitted"):
+            # 시간 초과 → 이미지 없이 자동 제출
+            submit_answer(None)
+            st.rerun()
 
+    if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']} (그려보세요!)")
 
-        # 캔버스 (단독 렌더링: 열/HTML 영향 안 받도록 기본 배치)
+        # 캔버스
         canvas_res = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=6,
@@ -403,9 +395,6 @@ elif page == "Game":
                     st.session_state["page"] = "Home"; st.rerun()
                 else:
                     next_round(); st.rerun()
-
-        if st.session_state.get("auto_submit_triggered") and not st.session_state["submitted"]:
-            submit_answer(canvas_img); st.rerun()
 
         if st.session_state["submitted"]:
             st.markdown("---")
