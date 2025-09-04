@@ -78,16 +78,12 @@ CATEGORIES = ["동물", "과일", "채소", "사물", "교통수단"]
 
 # ---------------- 프롬프트 ----------------
 PROMPT_GUESS_FREE = """
-[역할] 너는 초등학생의 스케치를 보고 정답을 맞추는 **심판**이다.
-
-[규칙]
-1. 반드시 **카테고리 정보를 최우선**으로 고려한다.
-   - 카테고리: {category}
-   - 카테고리에 없는 단어는 절대 답으로 출력하지 않는다.
-2. 스케치를 관찰하고, 카테고리에 해당하는 가장 가능성 높은 단어 1개만 출력한다.
-3. 출력은 반드시 한국어 단어 1개여야 한다. (설명/문장/기호/영문 금지)
-4. 색상 정보가 있으면 단서로 활용한다. (예: 빨강 → 사과, 노랑 → 바나나 등)
-5. 거친 선·부정확한 비율은 허용한다. 주요 특징(바퀴, 날개, 꼬리, 잎사귀 등)을 근거로 판단한다.
+[역할] 당신은 지금부터 학생들의 스케치를 보고 "단어"를 맞추는 탐정입니다. 주어진 스케치와 카테고리 정보를 결합하여 한국어 단어를 출력하세요. 
+[지시]
+- 카테고리: {category}
+- 이미지를 보고 한국어 단어 1개만 출력하세요. (설명/문장/기호/영문 금지)
+- 거친 선·부정확한 비율 허용. 윤곽/상징 요소(바퀴, 날개 등)를 중시하여 판단하세요.
+- **주어진 카테고리 정보에 기반해서 단어를 출력하세요. 카테고리를 벗어나는 단어를 출력하지 않습니다.**
 """
 
 
@@ -100,8 +96,8 @@ def init_state():
 
     ss.setdefault("game_started", False)
     ss.setdefault("score", 0)
-    ss.setdefault("round", 0)                   # 1부터 시작
-    ss.setdefault("canvas_key", "canvas_0")     # 라운드별 캔버스 키
+    ss.setdefault("round", 0)
+    ss.setdefault("canvas_key", "canvas_0")
 
     ss.setdefault("targets_pool", [])
     ss.setdefault("pool_index", 0)
@@ -115,13 +111,11 @@ def init_state():
     ss.setdefault("ai_error_msg", "")
 
     ss.setdefault("label_sets", [])
+
     ss.setdefault("ai_pending", False)
     ss.setdefault("last_canvas_png", None)
-    ss.setdefault("history", [])
 
-    # 색상 팔레트 기본값
-    ss.setdefault("stroke_color", "#000000")
-    ss.setdefault("stroke_width", 6)
+    ss.setdefault("history", [])
 
 
 # ---------------- keyword.csv ----------------
@@ -162,7 +156,7 @@ def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[Di
                     bank[cat].append(entry)
         return bank, None
     except FileNotFoundError:
-        return {}, "keyword.csv 파일이 없습니다."
+        return {}, "keyword.csv 파일이 없습니다. 프로젝트 루트에 배치해 주세요."
     except Exception as e:
         return {}, f"keyword.csv 로딩 오류: {e}"
 
@@ -193,7 +187,6 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
     model = get_gemini_model()
     if model is None:
         return ""
-
     prompt = PROMPT_GUESS_FREE.format(category=category)
     try:
         parts = [prompt, {"mime_type": "image/png", "data": image_to_png_bytes(img)}]
@@ -229,9 +222,8 @@ def start_game(keyword_bank: Dict[str, List[Dict[str, Any]]]):
     ss = st.session_state
     pool = build_targets_pool(ss["category"], keyword_bank)
     if len(pool) == 0:
-        st.warning("해당 카테고리에서 제시어를 찾지 못했습니다.")
+        st.warning("해당 카테고리에서 제시어를 찾지 못했습니다. keyword.csv를 확인하세요.")
         return
-
     ss["history"] = []
     ss["targets_pool"] = pool
     ss["pool_index"] = 0
@@ -261,13 +253,12 @@ def next_round():
     ss["last_guess"] = ""
     ss["ai_pending"] = False
     ss["last_canvas_png"] = None
-
     ss["target"] = pick_next_target()
     if ss["target"] is None:
+        st.warning("더 이상 출제할 제시어가 없습니다. Home으로 돌아가 새로 시작하세요.")
         ss["game_started"] = False
         ss["page"] = "Home"
         return
-
     ss["canvas_key"] = f"canvas_{ss['round']}"
     ss["round_end_time"] = datetime.utcnow() + timedelta(seconds=60)
 
@@ -284,15 +275,15 @@ def submit_answer_with_image(img_pil: Optional[Image.Image]):
     if ss["submitted"]:
         return
     ss["submitted"] = True
-
     guess = guess_from_image(img_pil, ss["category"]) if img_pil else "AI가 답을 찾지 못했습니다 😢"
     ss["last_guess"] = guess
-
     correct = is_correct(guess, ss.get("target"))
     if correct:
         ss["score"] += 1
-
-    img_bytes = image_to_png_bytes(img_pil) if img_pil else ss.get("last_canvas_png") or blank_png_bytes()
+    if img_pil is not None:
+        img_bytes = image_to_png_bytes(img_pil)
+    else:
+        img_bytes = ss.get("last_canvas_png") or blank_png_bytes()
     ss["history"].append({
         "round": ss["round"],
         "word": (ss.get("target") or {}).get("word", ""),
@@ -353,10 +344,10 @@ def refresh_label_from_inputs(idx: int):
 init_state()
 st.title("🎨 AI 스케치 퀴즈")
 
-# AI 상태 표시
+# AI 상태
 ai_status = st.session_state.get("ai_status", "unknown")
 if ai_status == "unavailable":
-    st.warning("⚠️ Gemini API 키가 설정되지 않았습니다.")
+    st.warning("⚠️ Gemini API 키가 설정되지 않아 AI를 호출할 수 없습니다.")
 elif ai_status == "error":
     st.error(f"❌ Gemini 호출 오류: {st.session_state.get('ai_error_msg', '')}")
 elif ai_status == "ok":
@@ -373,12 +364,23 @@ page = st.session_state.get("page", "Home")
 if page == "Home":
     st.subheader("카테고리 선택")
     st.radio("카테고리", CATEGORIES, key="category", horizontal=True)
-    st.number_input("문제 수", min_value=1, max_value=20, step=1, key="max_rounds")
+    st.number_input("문제 수", 1, 20, key="max_rounds")
     st.button("게임 시작", type="primary", on_click=start_game, args=(KEYWORD_BANK,))
+    st.markdown("---")
+    st.subheader("라벨링(선택) · 정확도 보조자료")
+    for i, item in enumerate(st.session_state["label_sets"]):
+        with st.container(border=True):
+            cols = st.columns([6, 1])
+            with cols[0]:
+                st.text_input("라벨 이름", value=item.get("name", ""), key=f"label_name_{i}")
+            with cols[1]:
+                st.button("🗑️ 삭제", key=f"delete_label_{i}", on_click=remove_label, args=(i,))
+            st.file_uploader("참조 이미지", key=f"label_files_{i}", type=["png","jpg","jpeg"], accept_multiple_files=True)
+            refresh_label_from_inputs(i)
+    st.button("+ 라벨 추가", on_click=add_label)
 
 # ========================= GAME =========================
 elif page == "Game":
-
     if st.session_state.get("ai_pending") and not st.session_state.get("submitted"):
         st.info("🤖 AI가 생각중입니다… 잠시만요.")
         img_bytes = st.session_state.get("last_canvas_png") or blank_png_bytes()
@@ -390,41 +392,45 @@ elif page == "Game":
         st.session_state["ai_pending"] = False
         st.rerun()
 
-    expired = False
-    remain = 0
+    expired, remain = False, 0
     if st.session_state.get("round_end_time"):
         remain = max(0, int((st.session_state["round_end_time"] - datetime.utcnow()).total_seconds()))
         expired = remain <= 0
 
-    st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
-    st.metric("점수", f"{st.session_state['score']}")
-    st.metric("남은 시간", f"{remain}초")
+    status_cols = st.columns([1, 1, 2])
+    with status_cols[0]:
+        st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
+    with status_cols[1]:
+        st.metric("점수", f"{st.session_state['score']}")
+    with status_cols[2]:
+        if st.session_state.get("game_started") and not st.session_state.get("submitted"):
+            if not expired:
+                end_dt = st.session_state["round_end_time"]
+                timer_html = f"""
+                <div style="text-align:right;font-size:48px;font-weight:700;">{remain}</div>
+                <script>
+                  const endTs = {int(end_dt.timestamp()*1000)};
+                  const el=document.querySelector('div[style*="font-size:48px"]');
+                  function tick(){{
+                    const left=Math.max(0,Math.floor((endTs-Date.now())/1000));
+                    if(el) el.textContent=left;
+                    if(left<=0) window.location.reload();
+                  }}
+                  setInterval(tick,1000);tick();
+                </script>
+                """
+                st.components.v1.html(timer_html, height=64)
 
     if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']['word']} (그려보세요!)")
-
         if not st.session_state.get("submitted"):
             if not expired:
-                # 🎨 팔레트 색상 선택
-                color_options = {
-                    "⚫ 검정": "#000000",
-                    "🔴 빨강": "#FF0000",
-                    "🟡 노랑": "#FFFF00",
-                    "🔵 파랑": "#0000FF",
-                    "🟢 초록": "#00FF00",
-                    "🟣 보라": "#800080"
-                }
-                selected_color = st.radio(
-                    "펜 색상 선택",
-                    list(color_options.keys()),
-                    horizontal=True,
-                    key=f"color_choice_{st.session_state['round']}"
-                )
-                draw_color = color_options[selected_color]
-
+                # 🎨 컬러 & 굵기 선택기
+                draw_color = st.color_picker("펜 색상 선택", "#000000", key=f"color_{st.session_state['round']}")
+                stroke_w = st.slider("펜 굵기", 2, 20, 6, key=f"stroke_{st.session_state['round']}")
                 canvas_res = st_canvas(
                     fill_color="rgba(0,0,0,0)",
-                    stroke_width=st.session_state["stroke_width"],
+                    stroke_width=stroke_w,
                     stroke_color=draw_color,
                     background_color="#FFFFFF",
                     update_streamlit=True,
@@ -438,38 +444,33 @@ elif page == "Game":
                     st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
                 elif st.session_state.get("last_canvas_png") is None:
                     st.session_state["last_canvas_png"] = blank_png_bytes()
-
                 cols = st.columns([1, 1, 1])
                 with cols[0]:
-                    if st.button("제출", type="primary", use_container_width=True):
+                    if st.button("제출", type="primary"):
                         trigger_submit()
                 with cols[1]:
-                    if st.button("패스", use_container_width=True):
+                    if st.button("패스"):
                         pass_question()
                 with cols[2]:
-                    st.button("다음 문제", use_container_width=True, disabled=True)
-
+                    st.button("다음 문제", disabled=True)
             else:
                 img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
-                st.image(img_preview, caption="⏰ 시간이 끝났습니다. 그림은 잠겼어요.", width=640)
-                st.warning("시간이 종료되었습니다. 제출 버튼을 눌러 결과를 확인하세요.")
-
-                cols = st.columns([1, 1, 1])
+                st.image(img_preview, caption="⏰ 시간이 끝났습니다.", width=640)
+                st.warning("시간이 종료되었습니다. **제출하세요** 버튼을 눌러 결과를 확인해주세요.")
+                cols = st.columns([1,1,1])
                 with cols[0]:
-                    if st.button("제출", type="primary", use_container_width=True):
+                    if st.button("제출", type="primary"):
                         trigger_submit()
                 with cols[1]:
-                    if st.button("패스", use_container_width=True):
+                    if st.button("패스"):
                         pass_question()
                 with cols[2]:
-                    st.button("다음 문제", use_container_width=True, disabled=True)
-
+                    st.button("다음 문제", disabled=True)
         else:
             st.markdown("---")
             st.subheader("결과")
             img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
             st.image(img_preview, caption="제출한 그림", width=320)
-
             cols2 = st.columns(3)
             with cols2[0]:
                 st.caption("AI 추측")
@@ -480,8 +481,7 @@ elif page == "Game":
             with cols2[2]:
                 verdict = "✅ 성공" if is_correct(st.session_state["last_guess"], st.session_state.get("target")) else "❌ 실패"
                 st.metric("판정", verdict)
-
-            cols_btns = st.columns([1, 1, 1])
+            cols_btns = st.columns([1,1,1])
             with cols_btns[0]:
                 if st.button("다음 문제"):
                     end_game_if_needed()
@@ -524,4 +524,4 @@ elif page == "Results":
                 st.session_state["page"]="Home"; st.session_state["game_started"]=False; st.rerun()
 
 st.markdown("---")
-st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI는 반드시 카테고리 기반으로 정답을 추측합니다.")
+st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다.")
