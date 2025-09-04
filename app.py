@@ -96,12 +96,12 @@ def init_state():
 
     ss.setdefault("game_started", False)
     ss.setdefault("score", 0)
-    ss.setdefault("round", 0)                   # 1부터 진행
-    ss.setdefault("canvas_key", "canvas_0")     # 라운드별 캔버스 키
+    ss.setdefault("round", 0)
+    ss.setdefault("canvas_key", "canvas_0")
 
-    ss.setdefault("targets_pool", [])           # [{word:str, aliases:[...]}]
+    ss.setdefault("targets_pool", [])
     ss.setdefault("pool_index", 0)
-    ss.setdefault("target", None)               # {"word": ..., "aliases":[...]}
+    ss.setdefault("target", None)
 
     ss.setdefault("submitted", False)
     ss.setdefault("last_guess", "")
@@ -112,11 +112,9 @@ def init_state():
 
     ss.setdefault("label_sets", [])
 
-    # AI 대기 & 스냅샷
     ss.setdefault("ai_pending", False)
     ss.setdefault("last_canvas_png", None)
 
-    # 결과 페이지용 히스토리
     ss.setdefault("history", [])
 
 
@@ -188,8 +186,7 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         return ""
     model = get_gemini_model()
     if model is None:
-        return ""  # 상태 배너로 안내
-
+        return ""
     prompt = PROMPT_GUESS_FREE.format(category=category)
     try:
         parts = [prompt, {"mime_type": "image/png", "data": image_to_png_bytes(img)}]
@@ -227,7 +224,6 @@ def start_game(keyword_bank: Dict[str, List[Dict[str, Any]]]):
     if len(pool) == 0:
         st.warning("해당 카테고리에서 제시어를 찾지 못했습니다. keyword.csv를 확인하세요.")
         return
-
     ss["history"] = []
     ss["targets_pool"] = pool
     ss["pool_index"] = 0
@@ -257,14 +253,12 @@ def next_round():
     ss["last_guess"] = ""
     ss["ai_pending"] = False
     ss["last_canvas_png"] = None
-
     ss["target"] = pick_next_target()
     if ss["target"] is None:
         st.warning("더 이상 출제할 제시어가 없습니다. Home으로 돌아가 새로 시작하세요.")
         ss["game_started"] = False
         ss["page"] = "Home"
         return
-
     ss["canvas_key"] = f"canvas_{ss['round']}"
     ss["round_end_time"] = datetime.utcnow() + timedelta(seconds=60)
 
@@ -281,20 +275,15 @@ def submit_answer_with_image(img_pil: Optional[Image.Image]):
     if ss["submitted"]:
         return
     ss["submitted"] = True
-
     guess = guess_from_image(img_pil, ss["category"]) if img_pil else "AI가 답을 찾지 못했습니다 😢"
     ss["last_guess"] = guess
-
     correct = is_correct(guess, ss.get("target"))
     if correct:
         ss["score"] += 1
-
-    # 제출 당시 이미지
     if img_pil is not None:
         img_bytes = image_to_png_bytes(img_pil)
     else:
         img_bytes = ss.get("last_canvas_png") or blank_png_bytes()
-
     ss["history"].append({
         "round": ss["round"],
         "word": (ss.get("target") or {}).get("word", ""),
@@ -317,7 +306,6 @@ def pass_question():
 
 
 def trigger_submit():
-    """수동 제출 트리거(자동제출 없음)."""
     ss = st.session_state
     if ss.get("submitted") or ss.get("ai_pending"):
         return
@@ -354,13 +342,12 @@ def refresh_label_from_inputs(idx: int):
 
 # ---------------- UI ----------------
 init_state()
-
 st.title("🎨 AI 스케치 퀴즈")
 
 # AI 상태
 ai_status = st.session_state.get("ai_status", "unknown")
 if ai_status == "unavailable":
-    st.warning("⚠️ Gemini API 키가 설정되지 않아 AI를 호출할 수 없습니다. (GEMINI_API_KEY 필요)")
+    st.warning("⚠️ Gemini API 키가 설정되지 않아 AI를 호출할 수 없습니다.")
 elif ai_status == "error":
     st.error(f"❌ Gemini 호출 오류: {st.session_state.get('ai_error_msg', '')}")
 elif ai_status == "ok":
@@ -377,35 +364,25 @@ page = st.session_state.get("page", "Home")
 if page == "Home":
     st.subheader("카테고리 선택")
     st.radio("카테고리", CATEGORIES, key="category", horizontal=True)
-    st.number_input("문제 수", min_value=1, max_value=20, step=1, key="max_rounds")
+    st.number_input("문제 수", 1, 20, key="max_rounds")
     st.button("게임 시작", type="primary", on_click=start_game, args=(KEYWORD_BANK,))
-
     st.markdown("---")
     st.subheader("라벨링(선택) · 정확도 보조자료")
-    st.caption("필수 아님: 라벨과 참조 이미지를 추가하면 판정 시 참고합니다.")
     for i, item in enumerate(st.session_state["label_sets"]):
         with st.container(border=True):
             cols = st.columns([6, 1])
             with cols[0]:
-                st.text_input("라벨 이름", value=item.get("name", ""), key=f"label_name_{i}", placeholder="예: 사과")
+                st.text_input("라벨 이름", value=item.get("name", ""), key=f"label_name_{i}")
             with cols[1]:
-                st.button("🗑️ 삭제", key=f"delete_label_{i}", on_click=remove_label, args=(i,), use_container_width=True)
-            st.file_uploader(
-                "참조 이미지(최대 10장)",
-                key=f"label_files_{i}",
-                type=["png", "jpg", "jpeg"],
-                accept_multiple_files=True,
-            )
+                st.button("🗑️ 삭제", key=f"delete_label_{i}", on_click=remove_label, args=(i,))
+            st.file_uploader("참조 이미지", key=f"label_files_{i}", type=["png","jpg","jpeg"], accept_multiple_files=True)
             refresh_label_from_inputs(i)
     st.button("+ 라벨 추가", on_click=add_label)
 
 # ========================= GAME =========================
 elif page == "Game":
-
-    # ---- AI 처리(토글 없는 안내) ----
     if st.session_state.get("ai_pending") and not st.session_state.get("submitted"):
         st.info("🤖 AI가 생각중입니다… 잠시만요.")
-        # 스냅샷에서 이미지 복원 후 즉시 판정
         img_bytes = st.session_state.get("last_canvas_png") or blank_png_bytes()
         try:
             img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -413,17 +390,13 @@ elif page == "Game":
             img_pil = None
         submit_answer_with_image(img_pil)
         st.session_state["ai_pending"] = False
-        # 같은 라운드에서 타이머가 다시 뜨지 않도록 비워도 되지만, 자동 제출이 없으므로 유지해도 무방
         st.rerun()
 
-    # ---- 남은 시간 계산 & 만료 여부 ----
-    expired = False
-    remain = 0
+    expired, remain = False, 0
     if st.session_state.get("round_end_time"):
         remain = max(0, int((st.session_state["round_end_time"] - datetime.utcnow()).total_seconds()))
         expired = remain <= 0
 
-    # ------- 상태 행: 라운드 / 점수 / 타이머 -------
     status_cols = st.columns([1, 1, 2])
     with status_cols[0]:
         st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
@@ -434,50 +407,31 @@ elif page == "Game":
             if not expired:
                 end_dt = st.session_state["round_end_time"]
                 timer_html = f"""
-                <div style="display:flex;justify-content:flex-end;align-items:center;">
-                  <div id="timer" style="font-size:48px;font-weight:700;line-height:64px;margin-top:-4px;padding-bottom:6px;">
-                    {remain}
-                  </div>
-                </div>
+                <div style="text-align:right;font-size:48px;font-weight:700;">{remain}</div>
                 <script>
                   const endTs = {int(end_dt.timestamp()*1000)};
-                  const el = document.getElementById('timer');
-                  let reloaded = false;
-                  function reloadOnce(){{
-                    if (reloaded) return;
-                    reloaded = true;
-                    clearInterval(tId);
-                    setTimeout(() => window.location.reload(), 50);
-                  }}
+                  const el=document.querySelector('div[style*="font-size:48px"]');
                   function tick(){{
-                    const left = Math.max(0, Math.floor((endTs - Date.now())/1000));
-                    if (el) el.textContent = left;
-                    if (left <= 0) reloadOnce();   // 0초가 되면 한 번만 리로드해서 '만료 상태'로 전환
+                    const left=Math.max(0,Math.floor((endTs-Date.now())/1000));
+                    if(el) el.textContent=left;
+                    if(left<=0) window.location.reload();
                   }}
-                  const tId = setInterval(tick, 1000);
-                  tick();
+                  setInterval(tick,1000);tick();
                 </script>
                 """
-                st.components.v1.html(timer_html, height=88)
-            else:
-                # 만료 후에는 0을 고정 표기(리로드 없음)
-                st.markdown(
-                    f"<div style='text-align:right;font-size:48px;font-weight:700;line-height:64px;'>0</div>",
-                    unsafe_allow_html=True,
-                )
+                st.components.v1.html(timer_html, height=64)
 
-    # 진행 중이면 메인 UI
     if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']['word']} (그려보세요!)")
-
-        # 1) 아직 제출 전: 시간 상태에 따라 캔버스/잠금 분기
         if not st.session_state.get("submitted"):
             if not expired:
-                # ---- 캔버스 사용 가능 상태 ----
+                # 🎨 컬러 & 굵기 선택기
+                draw_color = st.color_picker("펜 색상 선택", "#000000", key=f"color_{st.session_state['round']}")
+                stroke_w = st.slider("펜 굵기", 2, 20, 6, key=f"stroke_{st.session_state['round']}")
                 canvas_res = st_canvas(
-                    fill_color="rgba(0, 0, 0, 0)",
-                    stroke_width=6,
-                    stroke_color="#000000",
+                    fill_color="rgba(0,0,0,0)",
+                    stroke_width=stroke_w,
+                    stroke_color=draw_color,
                     background_color="#FFFFFF",
                     update_streamlit=True,
                     height=360,
@@ -486,114 +440,88 @@ elif page == "Game":
                     key=st.session_state["canvas_key"],
                 )
                 canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
-                # 최신 스냅샷 유지
                 if canvas_img is not None:
                     st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
                 elif st.session_state.get("last_canvas_png") is None:
                     st.session_state["last_canvas_png"] = blank_png_bytes()
-
                 cols = st.columns([1, 1, 1])
                 with cols[0]:
-                    if st.button("제출", type="primary", use_container_width=True):
+                    if st.button("제출", type="primary"):
                         trigger_submit()
                 with cols[1]:
-                    if st.button("패스", use_container_width=True):
+                    if st.button("패스"):
                         pass_question()
                 with cols[2]:
-                    # 제출 전에는 다음 문제 버튼 비활성화
-                    st.button("다음 문제", use_container_width=True, disabled=True)
-
+                    st.button("다음 문제", disabled=True)
             else:
-                # ---- ⏰ 만료: 캔버스 잠금 + 제출 유도 메시지 ----
                 img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
-                st.image(img_preview, caption="⏰ 시간이 끝났습니다. 그림은 잠겼어요.", width=640)
+                st.image(img_preview, caption="⏰ 시간이 끝났습니다.", width=640)
                 st.warning("시간이 종료되었습니다. **제출하세요** 버튼을 눌러 결과를 확인해주세요.")
-
-                cols = st.columns([1, 1, 1])
+                cols = st.columns([1,1,1])
                 with cols[0]:
-                    if st.button("제출", type="primary", use_container_width=True):
+                    if st.button("제출", type="primary"):
                         trigger_submit()
                 with cols[1]:
-                    if st.button("패스", use_container_width=True):
+                    if st.button("패스"):
                         pass_question()
                 with cols[2]:
-                    # 제출 전에는 다음 문제 버튼 비활성화
-                    st.button("다음 문제", use_container_width=True, disabled=True)
-
-        # 2) 이미 제출됨: 잠금/경고는 숨기고 결과만 노출
+                    st.button("다음 문제", disabled=True)
         else:
             st.markdown("---")
             st.subheader("결과")
             img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
-            st.image(img_preview, caption="제출한 그림", use_column_width=False, width=320)
-
+            st.image(img_preview, caption="제출한 그림", width=320)
             cols2 = st.columns(3)
             with cols2[0]:
                 st.caption("AI 추측")
-                guess_text = st.session_state["last_guess"] or "AI가 답을 찾지 못했습니다 😢"
-                st.success(guess_text)
+                st.success(st.session_state["last_guess"])
             with cols2[1]:
                 st.caption("정답 제시어")
-                st.info(st.session_state["target"]["word"] if st.session_state["target"] else "(없음)")
+                st.info(st.session_state["target"]["word"])
             with cols2[2]:
-                verdict = (
-                    "✅ 성공"
-                    if is_correct(st.session_state["last_guess"], st.session_state.get("target"))
-                    else "❌ 실패"
-                )
+                verdict = "✅ 성공" if is_correct(st.session_state["last_guess"], st.session_state.get("target")) else "❌ 실패"
                 st.metric("판정", verdict)
-
-            # 라운드 종료 시 이동 버튼
-            if st.session_state["round"] >= st.session_state["max_rounds"]:
-                st.warning("게임이 종료되었습니다. 결과 페이지로 이동해 전체 결과를 확인하세요.")
-                colr = st.columns(2)
-                with colr[0]:
-                    if st.button("결과 페이지로", type="primary", use_container_width=True):
-                        st.session_state["game_started"] = False
-                        st.session_state["page"] = "Results"
-                        st.rerun()
-                with colr[1]:
-                    if st.button("홈으로", use_container_width=True):
-                        st.session_state["game_started"] = False
-                        st.session_state["page"] = "Home"
-                        st.rerun()
-    else:
-        st.info("홈에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
+            cols_btns = st.columns([1,1,1])
+            with cols_btns[0]:
+                if st.button("다음 문제"):
+                    end_game_if_needed()
+                    if not st.session_state["game_started"]:
+                        st.session_state["page"] = "Results"; st.rerun()
+                    else:
+                        next_round(); st.rerun()
+            with cols_btns[1]:
+                if st.button("결과 페이지"):
+                    st.session_state["page"] = "Results"; st.session_state["game_started"]=False; st.rerun()
+            with cols_btns[2]:
+                if st.button("홈으로"):
+                    st.session_state["page"]="Home"; st.session_state["game_started"]=False; st.rerun()
 
 # ========================= RESULTS =========================
 elif page == "Results":
     st.header("📊 최종 결과")
     if not st.session_state.get("history"):
-        st.info("표시할 결과가 없습니다. 홈에서 새 게임을 시작해 보세요.")
+        st.info("표시할 결과가 없습니다.")
     else:
-        total = len(st.session_state["history"])
-        correct = sum(1 for h in st.session_state["history"] if h["correct"])
+        total=len(st.session_state["history"])
+        correct=sum(1 for h in st.session_state["history"] if h["correct"])
         st.metric("총 점수", f"{correct}/{total}")
-
-        st.markdown("---")
         for h in st.session_state["history"]:
             with st.container(border=True):
-                cols = st.columns([2, 2, 3])
+                cols=st.columns([2,2,3])
                 with cols[0]:
-                    st.image(h["image"], caption=f"Round {h['round']}", use_column_width=True)
+                    st.image(h["image"], caption=f"Round {h['round']}")
                 with cols[1]:
-                    st.write(f"**정답 제시어:** {h['word']}")
+                    st.write(f"**정답:** {h['word']}")
                     st.write(f"**AI 추측:** {h['guess']}")
                 with cols[2]:
                     st.write("**판정:** " + ("✅ 성공" if h["correct"] else "❌ 실패"))
-
-        st.markdown("---")
-        c = st.columns(2)
+        c=st.columns(2)
         with c[0]:
-            if st.button("다시 시작", type="primary", use_container_width=True):
-                st.session_state["page"] = "Home"
-                st.session_state["game_started"] = False
-                st.rerun()
+            if st.button("다시 시작", type="primary"):
+                st.session_state["page"]="Home"; st.session_state["game_started"]=False; st.rerun()
         with c[1]:
-            if st.button("홈으로", use_container_width=True):
-                st.session_state["page"] = "Home"
-                st.session_state["game_started"] = False
-                st.rerun()
+            if st.button("홈으로"):
+                st.session_state["page"]="Home"; st.session_state["game_started"]=False; st.rerun()
 
 st.markdown("---")
-st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다. (정답 인정: 문자열 유사도 0.8 이상, aliases 지원)")
+st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다.")
