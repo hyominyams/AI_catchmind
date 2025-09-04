@@ -3,11 +3,8 @@
 
 """
 AI 스케치 퀴즈 — 카테고리 기반 제시어 + Gemini 2.5-Flash
-
-실행:
-  pip install -r requirements.txt
-  export GEMINI_API_KEY="YOUR_KEY"
-  streamlit run app.py
+- 홈에서 카테고리 선택 → 게임 시작 버튼으로 자동 이동
+- 홈 하단에 '라벨링(선택)' 영역 추가 (정확도 보조자료)
 """
 
 import os
@@ -21,7 +18,7 @@ from PIL import Image
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 
-# ---------------- Gemini 설정 ----------------
+# ---------------- Gemini ----------------
 try:
     import google.generativeai as genai
 except Exception:
@@ -39,7 +36,7 @@ def get_gemini_model():
         return None
 
 
-# ---------------- 유틸 ----------------
+# ---------------- Utils ----------------
 def pil_from_canvas(image_data: Optional[np.ndarray]) -> Optional[Image.Image]:
     if image_data is None:
         return None
@@ -60,14 +57,13 @@ def normalize(s: Optional[str]) -> str:
     return (s or "").strip().lower()
 
 
-# ---------------- 카테고리 ----------------
+# ---------------- Categories ----------------
 CATEGORIES = [
     "동물", "과일", "채소", "사물", "교통수단",
     "자연", "가전제품", "의류/패션", "스포츠/놀이", "건물/장소"
 ]
 
-
-# ---------------- 프롬프트 ----------------
+# ---------------- Prompts ----------------
 PROMPT_TARGET = """
 [역할]
 너는 초등학생용 그림 퀴즈 출제자다.
@@ -94,8 +90,7 @@ PROMPT_GUESS = """
 - 다른 단어, 문장, 설명 없이.
 """
 
-
-# ---------------- 세션 상태 ----------------
+# ---------------- Session ----------------
 def init_state():
     ss = st.session_state
     ss.setdefault("page", "Home")
@@ -107,11 +102,14 @@ def init_state():
     ss.setdefault("submitted", False)
     ss.setdefault("last_guess", "")
     ss.setdefault("round_end_time", None)
-    ss.setdefault("max_rounds", 5)
+    ss.setdefault("max_rounds", 5)           # 여기서만 기본값 설정
     ss.setdefault("auto_submit_triggered", False)
 
+    # 라벨링(선택: 정확도 보조자료) — [{name: str, images: List[bytes]}]
+    ss.setdefault("label_sets", [])
 
-# ---------------- Gemini 호출 ----------------
+
+# ---------------- Gemini Calls ----------------
 def generate_target_word(category: str) -> str:
     model = get_gemini_model()
     if model is None:
@@ -123,6 +121,19 @@ def generate_target_word(category: str) -> str:
         return word
     except Exception:
         return random.choice(["사과", "고양이", "자동차"])
+
+
+def build_reference_parts(label_sets: List[Dict[str, Any]]) -> List[Any]:
+    parts: List[Any] = []
+    for item in label_sets:
+        name = item.get("name")
+        imgs: List[bytes] = item.get("images") or []
+        if not name or not imgs:
+            continue
+        parts.append(f"참조: {name}")
+        for b in imgs[:10]:
+            parts.append({"mime_type": "image/png", "data": b})
+    return parts
 
 
 def guess_from_image(img: Optional[Image.Image], answer: str) -> str:
@@ -137,6 +148,8 @@ def guess_from_image(img: Optional[Image.Image], answer: str) -> str:
             prompt,
             {"mime_type": "image/png", "data": image_to_png_bytes(img)}
         ]
+        # 선택: 라벨링 참조 이미지도 함께 전달 (정확도 보조)
+        parts.extend(build_reference_parts(st.session_state.get("label_sets", [])))
         resp = model.generate_content(parts)
         text = (resp.text or "").strip().replace("\n", "")
         return text
@@ -144,13 +157,14 @@ def guess_from_image(img: Optional[Image.Image], answer: str) -> str:
         return ""
 
 
-# ---------------- 게임 로직 ----------------
+# ---------------- Game Flow ----------------
 def start_game():
     ss = st.session_state
     ss["game_started"] = True
     ss["score"] = 0
     ss["round"] = 0
     next_round()
+    ss["page"] = "Game"     # 홈 → 게임 화면으로 자동 이동
 
 
 def next_round():
@@ -180,22 +194,81 @@ def submit_answer(img_pil: Optional[Image.Image]):
         ss["score"] += 1
 
 
+# ---------------- Labeling (Home 하단) ----------------
+def add_label():
+    st.session_state["label_sets"].append({"name": "", "images": []})
+
+
+def remove_label(idx: int):
+    labels = st.session_state.get("label_sets", [])
+    if 0 <= idx < len(labels):
+        labels.pop(idx)
+
+
+def refresh_label_from_inputs(idx: int):
+    key_name = f"label_name_{idx}"
+    key_files = f"label_files_{idx}"
+    name_val = st.session_state.get(key_name, "").strip()
+    files_val = st.session_state.get(key_files) or []
+
+    st.session_state["label_sets"][idx]["name"] = name_val
+
+    imgs: List[bytes] = []
+    for f in files_val[:10]:
+        try:
+            img = Image.open(f).convert("RGB")
+            imgs.append(image_to_png_bytes(img))
+        except Exception:
+            pass
+    st.session_state["label_sets"][idx]["images"] = imgs
+
+
 # ---------------- UI ----------------
 init_state()
 st.set_page_config(page_title="AI 스케치 퀴즈", page_icon="🎨", layout="wide")
 
-st.title("🎨 AI 스케치 퀴즈 — 카테고리 기반")
+st.title("🎨 AI 스케치 퀴즈")
 
-page = st.sidebar.radio("페이지", ["Home", "Game"], index=0, key="page")
+# 현재 페이지에 따라 렌더링
+page = st.session_state.get("page", "Home")
 
 if page == "Home":
-    st.subheader("Home — 카테고리 선택 & 게임 설정")
+    # 1) 카테고리 & 게임 설정 (간결하게)
+    st.subheader("카테고리 선택")
     st.radio("카테고리", CATEGORIES, key="category", horizontal=True)
-    st.number_input("문제 수", min_value=1, max_value=20, value=st.session_state["max_rounds"], step=1, key="max_rounds")
-    st.button("게임 시작", type="primary", on_click=start_game)
-    st.info("카테고리를 선택한 후 '게임 시작'을 누르고, 사이드바에서 Game으로 이동하세요.")
 
-else:  # Game
+    st.number_input("문제 수", min_value=1, max_value=20, step=1, key="max_rounds")
+    st.button("게임 시작", type="primary", on_click=start_game)
+
+    st.markdown("---")
+
+    # 2) 라벨링(선택) — 페이지 하단 배치
+    st.subheader("라벨링(선택) · 정확도 보조자료")
+    st.caption("필수 아님: 필요 시 라벨과 참조 이미지를 추가하면 AI가 판정할 때 함께 참고합니다.")
+
+    # 라벨 목록 렌더링
+    for i, item in enumerate(st.session_state["label_sets"]):
+        with st.container(border=True):
+            cols = st.columns([6, 1])
+            with cols[0]:
+                st.text_input("라벨 이름", value=item.get("name", ""),
+                              key=f"label_name_{i}", placeholder="예: 사과")
+            with cols[1]:
+                st.button("🗑️ 삭제", key=f"delete_label_{i}",
+                          on_click=remove_label, args=(i,), use_container_width=True)
+
+            st.file_uploader(
+                "참조 이미지(최대 10장)",
+                key=f"label_files_{i}",
+                type=["png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                help="가능하면 라벨의 대표적인 모습을 담은 간단한 이미지로 준비하세요."
+            )
+            refresh_label_from_inputs(i)
+
+    st.button("+ 라벨 추가", on_click=add_label)
+
+elif page == "Game":
     status_cols = st.columns([1, 1, 2])
     with status_cols[0]:
         st.metric("라운드", f"{st.session_state['round']}")
@@ -258,13 +331,12 @@ else:  # Game
             if nxt:
                 end_game_if_needed()
                 if not st.session_state["game_started"]:
-                    st.warning("게임이 종료되었습니다. Home에서 재시작하세요.")
+                    st.warning("게임이 종료되었습니다. 홈으로 돌아가 새 게임을 시작하세요.")
+                    st.session_state["page"] = "Home"
                 else:
                     next_round()
-
-            end_game_if_needed()
     else:
-        st.info("Home에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
+        st.info("홈에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
 
 st.markdown("---")
-st.caption("Tip: 카테고리는 Home에서 고를 수 있으며, 제시어는 Gemini가 한국어로 자동 생성합니다.")
+st.caption("Tip: 라벨링은 선택 기능입니다. 필요 시 라벨·이미지를 추가하면 AI가 판정 시 함께 참고합니다.")
