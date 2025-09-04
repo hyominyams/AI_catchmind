@@ -5,6 +5,7 @@ import os
 import io
 import csv
 import random
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -12,6 +13,7 @@ import numpy as np
 from PIL import Image
 import streamlit as st
 from streamlit_drawable_canvas import st_canvas
+from difflib import SequenceMatcher
 
 # ---------------- Gemini ----------------
 try:
@@ -37,6 +39,20 @@ def get_gemini_model():
 
 
 # ---------------- Utils ----------------
+SPACE_PTN = re.compile(r"\s+")
+PUNCT_PTN = re.compile(r"[^\w\u3131-\u318E\uAC00-\uD7A3]+")
+
+def norm_ko(s: Optional[str]) -> str:
+    """한글/영문 소문자 + 공백/기호 제거."""
+    s = (s or "").strip().lower()
+    s = SPACE_PTN.sub("", s)
+    s = PUNCT_PTN.sub("", s)
+    return s
+
+def sim(a: str, b: str) -> float:
+    """문자열 유사도: 0~1 (difflib)"""
+    return SequenceMatcher(None, norm_ko(a), norm_ko(b)).ratio()
+
 def pil_from_canvas(image_data: Optional[np.ndarray]) -> Optional[Image.Image]:
     if image_data is None:
         return None
@@ -46,18 +62,13 @@ def pil_from_canvas(image_data: Optional[np.ndarray]) -> Optional[Image.Image]:
     composed = Image.alpha_composite(bg, img)
     return composed.convert("RGB")
 
-
 def image_to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def normalize(s: Optional[str]) -> str:
-    return (s or "").strip().lower()
-
-
-# ---------------- 카테고리 (5개) ----------------
+# ---------------- 카테고리 ----------------
 CATEGORIES = ["동물", "과일", "채소", "사물", "교통수단"]
 
 
@@ -131,10 +142,7 @@ def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[st
 
 
 def build_targets_pool(category: str, bank: Dict[str, List[str]]) -> List[str]:
-    """
-    선택 카테고리의 모든 키워드를 섞어서 풀로 만듦(여분 포함).
-    패스가 있어도 충분히 다음 문제가 나오도록 전체를 준비한다.
-    """
+    """선택 카테고리의 모든 키워드를 섞어서 풀로 만듦(여분 포함)."""
     candidates = (bank or {}).get(category, []).copy()
     random.shuffle(candidates)
     return candidates
@@ -173,13 +181,16 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         resp = model.generate_content(parts)
         text = (getattr(resp, "text", "") or "").strip()
         text = text.replace("\n", " ").replace("\r", " ").strip().strip('"\'')
+        if not text:
+            return "AI가 답을 찾지 못했습니다 😢"
+        # 단어 1개만 강제
         if " " in text:
-            text = text.split()[0]  # 단어 1개만
+            text = text.split()[0]
         return text
     except Exception as e:
         st.session_state["ai_status"] = "error"
         st.session_state["ai_error_msg"] = str(e)
-        return ""
+        return "AI가 답을 찾지 못했습니다 😢"
 
 
 # ---------------- 게임 플로우 ----------------
@@ -190,7 +201,7 @@ def start_game(keyword_bank: Dict[str, List[str]]):
         st.warning("해당 카테고리에서 제시어를 찾지 못했습니다. keyword.csv를 확인하세요.")
         return
 
-    ss["targets_pool"] = pool          # 여분 포함 전체
+    ss["targets_pool"] = pool
     ss["pool_index"] = 0
     ss["game_started"] = True
     ss["score"] = 0
@@ -218,7 +229,6 @@ def next_round():
 
     ss["target"] = pick_next_target()
 
-    # 충분한 여분이 없을 수 있으나(극단적 패스 남발), 없으면 None
     if ss["target"] is None:
         st.warning("더 이상 출제할 제시어가 없습니다. Home으로 돌아가 새로 시작하세요.")
         ss["game_started"] = False
@@ -239,23 +249,20 @@ def submit_answer(img_pil: Optional[Image.Image]):
     if ss["submitted"]:
         return
     ss["submitted"] = True
-    guess = guess_from_image(img_pil, ss["category"]) if img_pil else ""
+    guess = guess_from_image(img_pil, ss["category"]) if img_pil else "AI가 답을 찾지 못했습니다 😢"
     ss["last_guess"] = guess
-    if normalize(guess) == normalize(ss.get("target")):
+
+    # 유사도 0.8 이상 정답 인정
+    if sim(guess, ss.get("target", "")) >= 0.8:
         ss["score"] += 1
 
 
 def pass_question():
-    """
-    패스는 한 문제 소비로 간주(라운드 +1). 결과 화면 없이 곧바로 다음 문제로 이동.
-    """
+    """패스: 결과 화면 없이 바로 다음 문제로 이동."""
     if not st.session_state.get("game_started"):
         return
-    # 라운드를 이미 시작한 상태이므로, 제출 처리만 '실패'로 간주하고 넘김
     st.session_state["submitted"] = True
-    # 다음 문제로 즉시 전환
     if st.session_state["round"] >= st.session_state["max_rounds"]:
-        # 이미 목표 수만큼 진행했으면 종료
         st.session_state["game_started"] = False
         st.session_state["page"] = "Home"
     else:
@@ -324,6 +331,7 @@ if page == "Home":
     # 라벨링(선택) — 하단
     st.subheader("라벨링(선택) · 정확도 보조자료")
     st.caption("필수 아님: 라벨과 참조 이미지를 추가하면 판정 시 참고합니다.")
+
     for i, item in enumerate(st.session_state["label_sets"]):
         with st.container(border=True):
             cols = st.columns([6, 1])
@@ -339,21 +347,39 @@ if page == "Home":
                 accept_multiple_files=True,
             )
             refresh_label_from_inputs(i)
+
     st.button("+ 라벨 추가", on_click=add_label)
 
 elif page == "Game":
-    # 1초 타이머: 우선 내장/외부 모두 시도 (외부 패키지 없어도 동작하도록 JS 폴백)
-    if st.session_state.get("game_started") and not st.session_state.get("submitted"):
-        try:
-            # streamlit-autorefresh 패키지가 있으면 사용
-            from streamlit_autorefresh import st_autorefresh  # type: ignore
-            st_autorefresh(interval=1000, key="__tick__")
-        except Exception:
-            # JS 폴백: 1초마다 새로고침
-            st.markdown(
-                "<script>setTimeout(function(){window.location.reload();}, 1000);</script>",
-                unsafe_allow_html=True,
-            )
+    # ---- JS 기반 타이머 표시 + 1초 재로딩(정확도 향상) ----
+    if st.session_state.get("game_started"):
+        end_dt = st.session_state.get("round_end_time")
+        if end_dt:
+            # 남은 초 계산(서버 기준)
+            remain = int((end_dt - datetime.utcnow()).total_seconds())
+            remain = max(0, remain)
+
+            # 큰 글자 타이머 + 1초마다 화면 리프레시로 서버와 동기화
+            timer_html = f"""
+            <div style="display:flex;justify-content:center;align-items:center;">
+              <div id="timer" style="font-size:48px;font-weight:700;">{remain}</div>
+            </div>
+            <script>
+              const endTs = {int(end_dt.timestamp()*1000)};
+              function tick(){{
+                const now = Date.now();
+                let left = Math.max(0, Math.floor((endTs - now)/1000));
+                document.getElementById('timer').innerText = left;
+                if(left<=0) {{
+                  // 1초 뒤 리로드(서버가 자동 제출 처리)
+                  setTimeout(()=>window.location.reload(), 200);
+                }}
+              }}
+              tick();
+              setInterval(()=>{{tick();}}, 1000);
+            </script>
+            """
+            st.components.v1.html(timer_html, height=70)
 
     status_cols = st.columns([1, 1, 2])
     with status_cols[0]:
@@ -361,13 +387,14 @@ elif page == "Game":
     with status_cols[1]:
         st.metric("점수", f"{st.session_state['score']}")
     with status_cols[2]:
+        # 서버에서도 동일 계산(권위적 상태)
         if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
             remaining = int((st.session_state["round_end_time"] - datetime.utcnow()).total_seconds())
             remaining = max(0, remaining)
             st.metric("남은 시간 (초)", f"{remaining}")
 
     if st.session_state.get("game_started"):
-        # 시간 만료 자동 제출
+        # 시간 만료 자동 제출(서버 권위)
         if st.session_state.get("round_end_time") and datetime.utcnow() >= st.session_state["round_end_time"]:
             if not st.session_state["submitted"]:
                 st.session_state["auto_submit_triggered"] = True
@@ -415,9 +442,7 @@ elif page == "Game":
             cols2 = st.columns(3)
             with cols2[0]:
                 st.caption("AI 추측")
-                guess_text = st.session_state["last_guess"] or "(응답 없음)"
-                if st.session_state.get("ai_status") != "ok" and not st.session_state["last_guess"]:
-                    guess_text += "  ·  ⚠️ AI 미호출"
+                guess_text = st.session_state["last_guess"] or "AI가 답을 찾지 못했습니다 😢"
                 st.success(guess_text)
             with cols2[1]:
                 st.caption("정답 제시어")
@@ -425,7 +450,7 @@ elif page == "Game":
             with cols2[2]:
                 verdict = (
                     "✅ 성공"
-                    if normalize(st.session_state["last_guess"]) == normalize(st.session_state.get("target"))
+                    if sim(st.session_state["last_guess"], st.session_state.get("target", "")) >= 0.8
                     else "❌ 실패"
                 )
                 st.metric("판정", verdict)
@@ -441,4 +466,4 @@ elif page == "Game":
         st.info("홈에서 카테고리를 고르고 '게임 시작'을 눌러주세요.")
 
 st.markdown("---")
-st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다.")
+st.caption("제시어는 keyword.csv에서 무작위로 선정됩니다. AI에는 카테고리 외 단어 목록을 절대 제공하지 않습니다. (정답 인정: 문자열 유사도 0.8 이상)")
