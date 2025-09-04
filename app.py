@@ -15,7 +15,7 @@ import streamlit as st
 from streamlit_drawable_canvas import st_canvas
 from difflib import SequenceMatcher
 
-# ---------------- Page Config (권장: 최상단) ----------------
+# ---------------- Page Config ----------------
 st.set_page_config(page_title="AI 스케치 퀴즈", page_icon="🎨", layout="wide")
 
 # ---------------- Gemini ----------------
@@ -111,29 +111,22 @@ def init_state():
 
     ss.setdefault("label_sets", [])
 
-    # AI 대기 & 자동제출용 최신 스냅샷
+    # AI 대기 & 스냅샷
     ss.setdefault("ai_pending", False)
     ss.setdefault("last_canvas_png", None)
 
-    # 최종 결과 페이지용 히스토리
-    # [{round:int, word:str, guess:str, correct:bool, image:bytes}]
+    # 결과 페이지용 히스토리
     ss.setdefault("history", [])
 
 
-# ---------------- keyword.csv 로딩 ----------------
+# ---------------- keyword.csv ----------------
 @st.cache_data(show_spinner=False)
 def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[Dict[str, Any]]], Optional[str]]:
-    """
-    CSV 형식(권장): category,keyword,aliases
-    - aliases는 '|' 로 구분 (없어도 됨)
-    반환: {카테고리: [ {"word": str, "aliases": [str,...]} , ... ]}
-    """
     bank: Dict[str, List[Dict[str, Any]]] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
             reader = csv.reader(f)
             header = next(reader, None)
-            # 헤더 판단
             has_header = False
             idx_cat, idx_kw, idx_alias = 0, 1, None
             if header:
@@ -160,10 +153,8 @@ def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[Di
                     aliases = [a.strip() for a in row[idx_alias].split("|") if a.strip()]
                 bank.setdefault(cat, [])
                 entry = {"word": word, "aliases": aliases}
-                # 중복 방지
                 if all(e["word"] != word for e in bank[cat]):
                     bank[cat].append(entry)
-
         return bank, None
     except FileNotFoundError:
         return {}, "keyword.csv 파일이 없습니다. 프로젝트 루트에 배치해 주세요."
@@ -216,7 +207,7 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         return "AI가 답을 찾지 못했습니다 😢"
 
 
-# ---------------- 정답 판정 ----------------
+# ---------------- 판정 ----------------
 def is_correct(guess: str, target: Dict[str, Any], threshold: float = 0.8) -> bool:
     if not target:
         return False
@@ -236,7 +227,7 @@ def start_game(keyword_bank: Dict[str, List[Dict[str, Any]]]):
         st.warning("해당 카테고리에서 제시어를 찾지 못했습니다. keyword.csv를 확인하세요.")
         return
 
-    ss["history"] = []  # 히스토리 초기화
+    ss["history"] = []
     ss["targets_pool"] = pool
     ss["pool_index"] = 0
     ss["game_started"] = True
@@ -244,7 +235,7 @@ def start_game(keyword_bank: Dict[str, List[Dict[str, Any]]]):
     ss["round"] = 0
     ss["last_canvas_png"] = None
     ss["ai_pending"] = False
-    next_round()  # round=1부터 시작
+    next_round()
     ss["page"] = "Game"
     st.rerun()
 
@@ -273,7 +264,6 @@ def next_round():
         ss["page"] = "Home"
         return
 
-    # 라운드별 캔버스 키 → 새 캔버스로 렌더
     ss["canvas_key"] = f"canvas_{ss['round']}"
     ss["round_end_time"] = datetime.utcnow() + timedelta(seconds=60)
 
@@ -282,11 +272,10 @@ def end_game_if_needed():
     ss = st.session_state
     if ss["round"] >= ss["max_rounds"] and ss["submitted"]:
         ss["game_started"] = False
-        ss["page"] = "Results"  # ★ 결과 페이지로 이동
+        ss["page"] = "Results"
 
 
 def submit_answer_with_image(img_pil: Optional[Image.Image]):
-    """이미지를 받아 Gemini 호출 + 판정 + 히스토리 적재."""
     ss = st.session_state
     if ss["submitted"]:
         return
@@ -299,13 +288,12 @@ def submit_answer_with_image(img_pil: Optional[Image.Image]):
     if correct:
         ss["score"] += 1
 
-    # 제출 당시 이미지 스냅샷(없으면 빈 PNG)
+    # 제출 당시 이미지
     if img_pil is not None:
         img_bytes = image_to_png_bytes(img_pil)
     else:
         img_bytes = ss.get("last_canvas_png") or blank_png_bytes()
 
-    # 히스토리에 누적
     ss["history"].append({
         "round": ss["round"],
         "word": (ss.get("target") or {}).get("word", ""),
@@ -319,7 +307,6 @@ def pass_question():
     if not st.session_state.get("game_started"):
         return
     st.session_state["submitted"] = True
-    # 라운드 한도 체크
     if st.session_state["round"] >= st.session_state["max_rounds"]:
         st.session_state["game_started"] = False
         st.session_state["page"] = "Results"
@@ -328,8 +315,8 @@ def pass_question():
     st.rerun()
 
 
-# 공용 제출 트리거: 수동/자동 모두 이 경로로
 def trigger_submit():
+    """수동 제출 트리거(자동제출 없음)."""
     ss = st.session_state
     if ss.get("submitted") or ss.get("ai_pending"):
         return
@@ -369,7 +356,7 @@ init_state()
 
 st.title("🎨 AI 스케치 퀴즈")
 
-# AI 상태 배너
+# AI 상태
 ai_status = st.session_state.get("ai_status", "unknown")
 if ai_status == "unavailable":
     st.warning("⚠️ Gemini API 키가 설정되지 않아 AI를 호출할 수 없습니다. (GEMINI_API_KEY 필요)")
@@ -414,121 +401,134 @@ if page == "Home":
 # ========================= GAME =========================
 elif page == "Game":
 
-    # ---- (A) 0초 도달 시: UI 렌더 전에 서버가 먼저 자동 제출 트리거 ----
-    if (
-        st.session_state.get("game_started")
-        and st.session_state.get("round_end_time")
-        and datetime.utcnow() >= st.session_state["round_end_time"]
-        and not st.session_state.get("submitted")
-        and not st.session_state.get("ai_pending")
-    ):
-        trigger_submit()
-
-    # ---- (B) AI PENDING 핸들러: 최우선 처리 (버튼 제출/시간만료 모두 이 경로) ----
+    # ---- AI 처리(토글 없는 안내) ----
     if st.session_state.get("ai_pending") and not st.session_state.get("submitted"):
-        with st.status("🤖 AI가 생각중입니다… 잠시만요.", state="running"):
-            # 스냅샷에서 이미지 복원
-            img_bytes = st.session_state.get("last_canvas_png") or blank_png_bytes()
+        st.info("🤖 AI가 생각중입니다… 잠시만요.")
+        # 스냅샷에서 이미지 복원 후 즉시 판정
+        img_bytes = st.session_state.get("last_canvas_png") or blank_png_bytes()
+        try:
+            img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        except Exception:
             img_pil = None
-            try:
-                img_pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            except Exception:
-                img_pil = None
-            submit_answer_with_image(img_pil)
-        # 제출 완료 → 같은 라운드에서 타이머가 다시 뜨지 않도록 시간 제거
+        submit_answer_with_image(img_pil)
         st.session_state["ai_pending"] = False
-        st.session_state["round_end_time"] = None
+        # 같은 라운드에서 타이머가 다시 뜨지 않도록 비워도 되지만, 자동 제출이 없으므로 유지해도 무방
         st.rerun()
 
-    # ------- 상태 행: 라운드 / 점수 / (오른쪽에 JS 타이머만) -------
+    # ---- 남은 시간 계산 & 만료 여부 ----
+    expired = False
+    remain = 0
+    if st.session_state.get("round_end_time"):
+        remain = max(0, int((st.session_state["round_end_time"] - datetime.utcnow()).total_seconds()))
+        expired = remain <= 0
+
+    # ------- 상태 행: 라운드 / 점수 / 타이머 -------
     status_cols = st.columns([1, 1, 2])
     with status_cols[0]:
         st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
     with status_cols[1]:
         st.metric("점수", f"{st.session_state['score']}")
     with status_cols[2]:
-        if (st.session_state.get("game_started")
-            and st.session_state.get("round_end_time")
-            and not st.session_state.get("submitted")
-            and not st.session_state.get("ai_pending")):
-            end_dt = st.session_state["round_end_time"]
-            remain = int((end_dt - datetime.utcnow()).total_seconds())
-            remain = max(0, remain)
-            timer_html = f"""
-            <div style="display:flex;justify-content:flex-end;align-items:center;">
-              <div id="timer" style="font-size:48px;font-weight:700;line-height:64px;margin-top:-4px;padding-bottom:6px;">
-                {remain}
-              </div>
-            </div>
-            <script>
-              const endTs = {int(end_dt.timestamp()*1000)};
-              const el = document.getElementById('timer');
-              let reloaded = false;
-              function reloadOnce(){{
-                if (reloaded) return;
-                reloaded = true;
-                clearInterval(tId);
-                setTimeout(() => window.location.reload(), 50);
-              }}
-              function tick(){{
-                const left = Math.max(0, Math.floor((endTs - Date.now())/1000));
-                if (el) el.textContent = left;
-                if (left <= 0) reloadOnce();
-              }}
-              const tId = setInterval(tick, 1000);
-              tick();
-              const msLeft = Math.max(0, endTs - Date.now());
-              setTimeout(reloadOnce, msLeft + 10);
-            </script>
-            """
-            st.components.v1.html(timer_html, height=88)
+        if st.session_state.get("game_started") and not st.session_state.get("submitted"):
+            if not expired:
+                end_dt = st.session_state["round_end_time"]
+                timer_html = f"""
+                <div style="display:flex;justify-content:flex-end;align-items:center;">
+                  <div id="timer" style="font-size:48px;font-weight:700;line-height:64px;margin-top:-4px;padding-bottom:6px;">
+                    {remain}
+                  </div>
+                </div>
+                <script>
+                  const endTs = {int(end_dt.timestamp()*1000)};
+                  const el = document.getElementById('timer');
+                  let reloaded = false;
+                  function reloadOnce(){{
+                    if (reloaded) return;
+                    reloaded = true;
+                    clearInterval(tId);
+                    setTimeout(() => window.location.reload(), 50);
+                  }}
+                  function tick(){{
+                    const left = Math.max(0, Math.floor((endTs - Date.now())/1000));
+                    if (el) el.textContent = left;
+                    if (left <= 0) reloadOnce();   // 0초가 되면 한 번만 리로드해서 '만료 상태'로 전환
+                  }}
+                  const tId = setInterval(tick, 1000);
+                  tick();
+                </script>
+                """
+                st.components.v1.html(timer_html, height=88)
+            else:
+                # 만료 후에는 0을 고정 표기(리로드 없음)
+                st.markdown(
+                    f"<div style='text-align:right;font-size:48px;font-weight:700;line-height:64px;'>0</div>",
+                    unsafe_allow_html=True,
+                )
 
     # 진행 중이면 메인 UI
     if st.session_state.get("game_started"):
         st.subheader(f"제시어: {st.session_state['target']['word']} (그려보세요!)")
 
-        # 1) 캔버스 (라운드별 고유 키)
-        canvas_res = st_canvas(
-            fill_color="rgba(0, 0, 0, 0)",
-            stroke_width=6,
-            stroke_color="#000000",
-            background_color="#FFFFFF",
-            update_streamlit=True,
-            height=360,
-            width=640,
-            drawing_mode="freedraw",
-            key=st.session_state["canvas_key"],
-        )
-        canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
+        if not expired and not st.session_state.get("submitted"):
+            # ---- 캔버스 사용 가능 상태 ----
+            canvas_res = st_canvas(
+                fill_color="rgba(0, 0, 0, 0)",
+                stroke_width=6,
+                stroke_color="#000000",
+                background_color="#FFFFFF",
+                update_streamlit=True,
+                height=360,
+                width=640,
+                drawing_mode="freedraw",
+                key=st.session_state["canvas_key"],
+            )
+            canvas_img = pil_from_canvas(canvas_res.image_data) if canvas_res is not None else None
+            # 최신 스냅샷 유지
+            if canvas_img is not None:
+                st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
+            elif st.session_state.get("last_canvas_png") is None:
+                st.session_state["last_canvas_png"] = blank_png_bytes()
 
-        # 항상 최신 스냅샷 유지 (선이 없어도 최소한 빈 PNG 보유)
-        if canvas_img is not None:
-            st.session_state["last_canvas_png"] = image_to_png_bytes(canvas_img)
-        elif st.session_state.get("last_canvas_png") is None:
-            st.session_state["last_canvas_png"] = blank_png_bytes()
+            cols = st.columns([1, 1, 1])
+            with cols[0]:
+                if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
+                    trigger_submit()
+            with cols[1]:
+                if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
+                    pass_question()
+            with cols[2]:
+                if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
+                    end_game_if_needed()
+                    if not st.session_state["game_started"]:
+                        st.rerun()
+                    else:
+                        next_round(); st.rerun()
 
-        # 2) 버튼들
-        cols = st.columns([1, 1, 1])
-        with cols[0]:
-            if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
-                trigger_submit()
-        with cols[1]:
-            if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
-                pass_question()
-        with cols[2]:
-            if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
-                end_game_if_needed()
-                if not st.session_state["game_started"]:
-                    # 결과 페이지 또는 홈으로 이동 로직은 end_game_if_needed가 결정
-                    st.rerun()
-                else:
-                    next_round(); st.rerun()
+        else:
+            # ---- ⏰ 만료: 캔버스 잠금 + 제출 유도 메시지 ----
+            img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
+            st.image(img_preview, caption="⏰ 시간이 끝났습니다. 그림은 잠겼어요.", width=640)
+            st.warning("시간이 종료되었습니다. **제출하세요** 버튼을 눌러 결과를 확인해주세요.")
 
-        # 3) 결과 (제출 후)
+            cols = st.columns([1, 1, 1])
+            with cols[0]:
+                if st.button("제출", type="primary", use_container_width=True, disabled=st.session_state["submitted"]):
+                    trigger_submit()
+            with cols[1]:
+                if st.button("패스", use_container_width=True, disabled=not st.session_state.get("game_started", False)):
+                    pass_question()
+            with cols[2]:
+                if st.button("다음 문제", use_container_width=True, disabled=not st.session_state.get("submitted", False)):
+                    end_game_if_needed()
+                    if not st.session_state["game_started"]:
+                        st.rerun()
+                    else:
+                        next_round(); st.rerun()
+
+        # ---- 제출 후 결과 패널 ----
         if st.session_state["submitted"]:
             st.markdown("---")
             st.subheader("결과")
-            # 제출한 그림을 항상 보여줌 (제출 후에도 그림이 남아있도록 보장)
             img_preview = st.session_state.get("last_canvas_png") or blank_png_bytes()
             st.image(img_preview, caption="제출한 그림", use_column_width=False, width=320)
 
@@ -548,7 +548,6 @@ elif page == "Game":
                 )
                 st.metric("판정", verdict)
 
-            # 게임 종료 처리 안내
             if st.session_state["round"] >= st.session_state["max_rounds"]:
                 st.warning("게임이 종료되었습니다. 결과 페이지로 이동해 전체 결과를 확인하세요.")
                 colr = st.columns(2)
@@ -571,13 +570,11 @@ elif page == "Results":
     if not st.session_state.get("history"):
         st.info("표시할 결과가 없습니다. 홈에서 새 게임을 시작해 보세요.")
     else:
-        # 요약 통계
         total = len(st.session_state["history"])
         correct = sum(1 for h in st.session_state["history"] if h["correct"])
         st.metric("총 점수", f"{correct}/{total}")
 
         st.markdown("---")
-        # 라운드별 카드형 출력
         for h in st.session_state["history"]:
             with st.container(border=True):
                 cols = st.columns([2, 2, 3])
