@@ -43,14 +43,12 @@ SPACE_PTN = re.compile(r"\s+")
 PUNCT_PTN = re.compile(r"[^\w\u3131-\u318E\uAC00-\uD7A3]+")
 
 def norm_ko(s: Optional[str]) -> str:
-    """한글/영문 소문자 + 공백/기호 제거."""
     s = (s or "").strip().lower()
     s = SPACE_PTN.sub("", s)
     s = PUNCT_PTN.sub("", s)
     return s
 
 def sim(a: str, b: str) -> float:
-    """문자열 유사도: 0~1 (difflib)"""
     return SequenceMatcher(None, norm_ko(a), norm_ko(b)).ratio()
 
 def pil_from_canvas(image_data: Optional[np.ndarray]) -> Optional[Image.Image]:
@@ -72,7 +70,7 @@ def image_to_png_bytes(img: Image.Image) -> bytes:
 CATEGORIES = ["동물", "과일", "채소", "사물", "교통수단"]
 
 
-# ---------------- 프롬프트 (후보 단어 절대 제공 금지) ----------------
+# ---------------- 프롬프트 ----------------
 PROMPT_GUESS_FREE = """
 [역할] 너는 초등학생의 스케치를 보고 정답을 추측하는 심판이다.
 [지시]
@@ -91,31 +89,26 @@ def init_state():
 
     ss.setdefault("game_started", False)
     ss.setdefault("score", 0)
-    ss.setdefault("round", 0)                   # 진행한 문제 수(제출/패스 포함)
+    ss.setdefault("round", 0)
 
-    ss.setdefault("targets_pool", [])           # CSV에서 섞어둔 전체 제시어 (여분 포함)
-    ss.setdefault("pool_index", 0)              # 다음에 쓸 인덱스
-    ss.setdefault("target", None)               # 현재 제시어
+    ss.setdefault("targets_pool", [])
+    ss.setdefault("pool_index", 0)
+    ss.setdefault("target", None)
 
     ss.setdefault("submitted", False)
     ss.setdefault("last_guess", "")
     ss.setdefault("round_end_time", None)
     ss.setdefault("auto_submit_triggered", False)
 
-    ss.setdefault("ai_status", "unknown")       # ok | unavailable | error | unknown
+    ss.setdefault("ai_status", "unknown")
     ss.setdefault("ai_error_msg", "")
 
-    # 라벨링(선택): [{name: str, images: List[bytes]}]
     ss.setdefault("label_sets", [])
 
 
-# ---------------- keyword.csv 로딩 ----------------
+# ---------------- keyword.csv ----------------
 @st.cache_data(show_spinner=False)
 def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[str]], Optional[str]]:
-    """
-    CSV 형식: category,keyword
-    반환: {카테고리: [단어...]}와 에러 메시지(없으면 None)
-    """
     data: Dict[str, List[str]] = {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -142,7 +135,6 @@ def load_keywords_from_csv(path: str = "keyword.csv") -> Tuple[Dict[str, List[st
 
 
 def build_targets_pool(category: str, bank: Dict[str, List[str]]) -> List[str]:
-    """선택 카테고리의 모든 키워드를 섞어서 풀로 만듦(여분 포함)."""
     candidates = (bank or {}).get(category, []).copy()
     random.shuffle(candidates)
     return candidates
@@ -167,7 +159,7 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         return ""
     model = get_gemini_model()
     if model is None:
-        return ""  # 상단 배너로 상태 표기
+        return ""
 
     prompt = PROMPT_GUESS_FREE.format(category=category)
     try:
@@ -175,7 +167,6 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
             prompt,
             {"mime_type": "image/png", "data": image_to_png_bytes(img)},
         ]
-        # (선택) 라벨링 참조 이미지 전달
         parts.extend(build_reference_parts(st.session_state.get("label_sets", [])))
 
         resp = model.generate_content(parts)
@@ -183,7 +174,6 @@ def guess_from_image(img: Optional[Image.Image], category: str) -> str:
         text = text.replace("\n", " ").replace("\r", " ").strip().strip('"\'')
         if not text:
             return "AI가 답을 찾지 못했습니다 😢"
-        # 단어 1개만 강제
         if " " in text:
             text = text.split()[0]
         return text
@@ -208,7 +198,7 @@ def start_game(keyword_bank: Dict[str, List[str]]):
     ss["round"] = 0
     next_round()
     ss["page"] = "Game"
-    st.rerun()  # 즉시 전환
+    st.rerun()
 
 
 def pick_next_target() -> Optional[str]:
@@ -228,7 +218,6 @@ def next_round():
     ss["auto_submit_triggered"] = False
 
     ss["target"] = pick_next_target()
-
     if ss["target"] is None:
         st.warning("더 이상 출제할 제시어가 없습니다. Home으로 돌아가 새로 시작하세요.")
         ss["game_started"] = False
@@ -251,14 +240,11 @@ def submit_answer(img_pil: Optional[Image.Image]):
     ss["submitted"] = True
     guess = guess_from_image(img_pil, ss["category"]) if img_pil else "AI가 답을 찾지 못했습니다 😢"
     ss["last_guess"] = guess
-
-    # 유사도 0.8 이상 정답 인정
     if sim(guess, ss.get("target", "")) >= 0.8:
         ss["score"] += 1
 
 
 def pass_question():
-    """패스: 결과 화면 없이 바로 다음 문제로 이동."""
     if not st.session_state.get("game_started"):
         return
     st.session_state["submitted"] = True
@@ -313,7 +299,7 @@ elif ai_status == "error":
 elif ai_status == "ok":
     st.success("✅ Gemini 연결 정상")
 
-# 키워드 CSV 로딩
+# 키워드 CSV
 KEYWORD_BANK, CSV_ERR = load_keywords_from_csv("keyword.csv")
 if CSV_ERR:
     st.error(f"❌ {CSV_ERR}")
@@ -327,11 +313,8 @@ if page == "Home":
     st.button("게임 시작", type="primary", on_click=start_game, args=(KEYWORD_BANK,))
 
     st.markdown("---")
-
-    # 라벨링(선택) — 하단
     st.subheader("라벨링(선택) · 정확도 보조자료")
     st.caption("필수 아님: 라벨과 참조 이미지를 추가하면 판정 시 참고합니다.")
-
     for i, item in enumerate(st.session_state["label_sets"]):
         with st.container(border=True):
             cols = st.columns([6, 1])
@@ -347,80 +330,48 @@ if page == "Home":
                 accept_multiple_files=True,
             )
             refresh_label_from_inputs(i)
-
     st.button("+ 라벨 추가", on_click=add_label)
 
 elif page == "Game":
-    # ---- JS 기반 타이머 표시 + 1초 재로딩(정확도 향상) ----
-    if st.session_state.get("game_started"):
-        end_dt = st.session_state.get("round_end_time")
-        if end_dt:
-            # 남은 초 계산(서버 기준)
+    # ------- 상태 행: 라운드 / 점수 / (오른쪽에 JS 타이머만) -------
+    status_cols = st.columns([1, 1, 2])
+    with status_cols[0]:
+        st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
+    with status_cols[1]:
+        st.metric("점수", f"{st.session_state['score']}")
+    with status_cols[2]:
+        if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
+            end_dt = st.session_state["round_end_time"]
             remain = int((end_dt - datetime.utcnow()).total_seconds())
             remain = max(0, remain)
-
-            # 큰 글자 타이머 + 1초마다 화면 리프레시로 서버와 동기화
             timer_html = f"""
-            <div style="display:flex;justify-content:center;align-items:center;">
-              <div id="timer" style="font-size:48px;font-weight:700;">{remain}</div>
+            <div style="display:flex;justify-content:flex-end;align-items:center;">
+              <div id="timer" style="font-size:48px;font-weight:700;margin-top:6px;">{remain}</div>
             </div>
             <script>
               const endTs = {int(end_dt.timestamp()*1000)};
               function tick(){{
                 const now = Date.now();
                 let left = Math.max(0, Math.floor((endTs - now)/1000));
-                document.getElementById('timer').innerText = left;
-                if(left<=0) {{
-                  // 1초 뒤 리로드(서버가 자동 제출 처리)
-                  setTimeout(()=>window.location.reload(), 200);
-                }}
+                const el = document.getElementById('timer');
+                if(el) el.innerText = left;
+                if(left<=0) setTimeout(()=>window.location.reload(), 200);
               }}
               tick();
-              setInterval(()=>{{tick();}}, 1000);
+              setInterval(tick, 1000);
             </script>
             """
-            st.components.v1.html(timer_html, height=70)
-
-status_cols = st.columns([1, 1, 2])
-with status_cols[0]:
-    st.metric("라운드", f"{st.session_state['round']}/{st.session_state['max_rounds']}")
-with status_cols[1]:
-    st.metric("점수", f"{st.session_state['score']}")
-with status_cols[2]:
-    # JS 타이머
-    if st.session_state.get("game_started") and st.session_state.get("round_end_time"):
-        end_dt = st.session_state["round_end_time"]
-        remain = int((end_dt - datetime.utcnow()).total_seconds())
-        remain = max(0, remain)
-        timer_html = f"""
-        <div style="display:flex;justify-content:flex-end;align-items:center;">
-          <div id="timer" style="font-size:48px;font-weight:700;margin-top:6px;">{remain}</div>
-        </div>
-        <script>
-          const endTs = {int(end_dt.timestamp()*1000)};
-          function tick(){{
-            const now = Date.now();
-            let left = Math.max(0, Math.floor((endTs - now)/1000));
-            const el = document.getElementById('timer');
-            if(el) el.innerText = left;
-            if(left<=0) setTimeout(()=>window.location.reload(), 200);
-          }}
-          tick();
-          setInterval(tick, 1000);
-        </script>
-        """
-        st.components.v1.html(timer_html, height=60)
-
-
+            st.components.v1.html(timer_html, height=60)
 
     if st.session_state.get("game_started"):
-        # 시간 만료 자동 제출(서버 권위)
+        # 서버 권위: 시간 만료 시 자동 제출 플래그
         if st.session_state.get("round_end_time") and datetime.utcnow() >= st.session_state["round_end_time"]:
             if not st.session_state["submitted"]:
                 st.session_state["auto_submit_triggered"] = True
 
         st.subheader(f"제시어: {st.session_state['target']} (그려보세요!)")
 
+        # 캔버스 (단독 렌더링: 열/HTML 영향 안 받도록 기본 배치)
         canvas_res = st_canvas(
             fill_color="rgba(0, 0, 0, 0)",
             stroke_width=6,
@@ -475,7 +426,6 @@ with status_cols[2]:
                 )
                 st.metric("판정", verdict)
 
-            # 끝났으면 알림 + 홈 이동 버튼
             if st.session_state["round"] >= st.session_state["max_rounds"]:
                 st.warning("게임이 종료되었습니다. 홈에서 새 게임을 시작하세요.")
                 if st.button("홈으로", use_container_width=True):
