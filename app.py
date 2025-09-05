@@ -524,16 +524,19 @@ elif page == "Game":
                     "🔴 빨강": "#FF4C4C",
                     "🟠 오렌지": "#FFA500",
                     "🟡 노랑": "#FDFFB6",
-                    "🟢 초록": "#CAFFBF",
+                    "🟢 초록": "#32CD32",
                     "🔵 파랑": "#3399FF",
                     "🟣 보라": "#BDB2FF",
                     "🌸 분홍": "#FFB5E8",
+                    "🌊 하늘": "#00CED1",
+                    "🟤 갈색": "#8B4513",
+                    "🍑 살구": "#FFDAB9",
+                    "⚪ 회색": "#808080",
                 }
                 pcols = st.columns(len(palette))
                 for i, (name, code) in enumerate(palette.items()):
                     if pcols[i].button(name, use_container_width=True):
                         st.session_state["stroke_color"] = code
-
 
                 # 캔버스
                 canvas_res = st_canvas(
