@@ -520,14 +520,14 @@ elif page == "Game":
             if not expired:
                 # 팔레트(버튼형) – 사용 가능 상태에서만 노출
                 palette = {
-                    "⚫ 파스텔 블랙": "#555555",
-                    "🔴 파스텔 레드": "#FFB3B3",
-                    "🟠 파스텔 오렌지": "#FFD6A5",
-                    "🟡 파스텔 옐로우": "#FDFFB6",
-                    "🟢 파스텔 그린": "#CAFFBF",
-                    "🔵 파스텔 블루": "#A0C4FF",
-                    "🟣 파스텔 퍼플": "#BDB2FF",
-                    "🌸 파스텔 핑크": "#FFB5E8",
+                    "⚫ 검정": "#555555",
+                    "🔴 빨강": "#FF4C4C",
+                    "🟠 오렌지": "#FFA500",
+                    "🟡 노랑": "#FDFFB6",
+                    "🟢 초록": "#CAFFBF",
+                    "🔵 파랑": "#3399FF",
+                    "🟣 보라": "#BDB2FF",
+                    "🌸 분홍": "#FFB5E8",
                 }
                 pcols = st.columns(len(palette))
                 for i, (name, code) in enumerate(palette.items()):
