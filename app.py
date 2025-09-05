@@ -520,17 +520,20 @@ elif page == "Game":
             if not expired:
                 # 팔레트(버튼형) – 사용 가능 상태에서만 노출
                 palette = {
-                    "⚫ 검정": "#000000",
-                    "🔴 빨강": "#FF0000",
-                    "🟡 노랑": "#FFFF00",
-                    "🔵 파랑": "#0000FF",
-                    "🟢 초록": "#008000",
-                    "🟣 보라": "#6A0DAD",
+                    "⚫ 파스텔 블랙": "#555555",
+                    "🔴 파스텔 레드": "#FFB3B3",
+                    "🟠 파스텔 오렌지": "#FFD6A5",
+                    "🟡 파스텔 옐로우": "#FDFFB6",
+                    "🟢 파스텔 그린": "#CAFFBF",
+                    "🔵 파스텔 블루": "#A0C4FF",
+                    "🟣 파스텔 퍼플": "#BDB2FF",
+                    "🌸 파스텔 핑크": "#FFB5E8",
                 }
                 pcols = st.columns(len(palette))
                 for i, (name, code) in enumerate(palette.items()):
                     if pcols[i].button(name, use_container_width=True):
                         st.session_state["stroke_color"] = code
+
 
                 # 캔버스
                 canvas_res = st_canvas(
