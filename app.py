@@ -28,7 +28,7 @@ def get_gemini_model():
         return None
     try:
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash-lite")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         st.session_state["ai_status"] = "ok"
         return model
     except Exception as e:
